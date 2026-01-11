@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Credentials and secrets
+shopify-lambda-integration-ff8f0760340f.json
+*.key
+*.pem
+.env.local
