@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Rimuove outline blu dai grafici Recharts */
+.recharts-responsive-container {
+  outline: none !important;
+}
+
+.recharts-wrapper {
+  outline: none !important;
+}
+
+.recharts-surface {
+  outline: none !important;
+}
+
+.recharts-pie-sector {
+  outline: none !important;
+}
+
+.recharts-sector {
+  outline: none !important;
+}
