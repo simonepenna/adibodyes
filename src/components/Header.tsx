@@ -75,7 +75,7 @@ const Header = ({ onMenuClick }: HeaderProps) => {
         <div className="flex items-center space-x-4">
           <div className="dropdown dropdown-end">
             <div tabIndex={0} role="button" className="btn btn-circle avatar hover:bg-base-200 active:bg-base-200 focus:bg-base-200">
-              <div className="w-8 rounded-full bg-base-300 border-2 border-base-content/20">
+              <div className="w-8 rounded-full bg-base-300 border-2 border-base-content/20 flex items-center justify-center">
                 <span className="text-xs text-base-content font-semibold">
                   {userInitial}
                 </span>

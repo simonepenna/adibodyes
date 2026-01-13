@@ -48,7 +48,7 @@ const Evasione = () => {
     } else if (order.category === 'YELLOW') {
       return <span className="badge badge-sm badge-warning">WARNING</span>;
     } else {
-      return <span className="badge badge-sm badge-error">NO STOCK</span>;
+      return <span className="badge badge-sm badge-error whitespace-nowrap">NO STOCK</span>;
     }
   };
 
