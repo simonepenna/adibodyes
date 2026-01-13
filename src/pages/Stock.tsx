@@ -85,7 +85,8 @@ const Stock = () => {
                     <th>SKU</th>
                     <th>Taglia</th>
                     <th>Aut.</th>
-                    <th>Qtà</th>
+                    <th>Magazzino</th>
+                    <th>In Arrivo</th>
                     <th>Stato</th>
                   </tr>
                 </thead>
@@ -95,7 +96,8 @@ const Stock = () => {
                       <td className="font-mono">{item.sku}</td>
                       <td className="font-medium">{item.talla}</td>
                       <td>{item.giorni_autonomia >= 999 ? '∞' : `${item.giorni_autonomia}gg`}</td>
-                      <td>{item.magazzino_netto}</td>
+                      <td>{item.magazzino_attuale}</td>
+                      <td>{item.in_arrivo}</td>
                       <td>
                         <span className={`badge ${
                           item.urgenza === 'OK' ? 'badge-success' :
@@ -124,7 +126,8 @@ const Stock = () => {
                     <th>SKU</th>
                     <th>Taglia</th>
                     <th>Aut.</th>
-                    <th>Qtà</th>
+                    <th>Magazzino</th>
+                    <th>In Arrivo</th>
                     <th>Stato</th>
                   </tr>
                 </thead>
@@ -134,7 +137,8 @@ const Stock = () => {
                       <td className="font-mono">{item.sku}</td>
                       <td className="font-medium">{item.talla}</td>
                       <td>{item.giorni_autonomia >= 999 ? '∞' : `${item.giorni_autonomia}gg`}</td>
-                      <td>{item.magazzino_netto}</td>
+                      <td>{item.magazzino_attuale}</td>
+                      <td>{item.in_arrivo}</td>
                       <td>
                         <span className={`badge ${
                           item.urgenza === 'OK' ? 'badge-success' :

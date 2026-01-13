@@ -345,7 +345,9 @@ def build_stock_data(weighted_avg, arrivo_fornitore, magazzino_attuale, backorde
             return 0
         vendite_previste = row["media_pesata"] * MOLTIPLICATORE_CRESCITA_VENDITE
         fabbisogno = max(0, (GIORNI_TARGET_SCORTA - row["autonomia_tra_transito"]) * vendite_previste)
-        return math.ceil(fabbisogno / 10) * 10 if fabbisogno > 0 else 0
+        if fabbisogno > 0:
+            return max(10, math.ceil(fabbisogno / 10) * 10)
+        return 0
     
     df["fabbisogno"] = df.apply(calcola_fabbisogno, axis=1).astype(int)
     
