@@ -158,17 +158,36 @@ def fetch_shopify_orders(days_back=10):
     
     data = response.json()
     
-    for order in data.get("orders", []):
-        created_at = order.get("created_at")
-        for item in order.get("line_items", []):
-            sku = item.get("sku")
-            qty = item.get("current_quantity")
-            if sku and created_at:
-                sku_data.append({
-                    "sku": sku,
-                    "current_quantity": qty,
-                    "created_at": created_at
-                })
+    def extract_data(orders):
+        for order in orders:
+            created_at = order.get("created_at")
+            for item in order.get("line_items", []):
+                sku = item.get("sku")
+                qty = item.get("current_quantity")
+                if sku and created_at:
+                    sku_data.append({
+                        "sku": sku,
+                        "current_quantity": qty,
+                        "created_at": created_at
+                    })
+    
+    extract_data(data.get("orders", []))
+    
+    # Paginazione - continua finché ci sono altre pagine
+    while 'Link' in response.headers and 'rel="next"' in response.headers['Link']:
+        link_header = response.headers['Link']
+        next_url = None
+        for part in link_header.split(','):
+            if 'rel="next"' in part:
+                next_url = part.split(';')[0].strip('<> ')
+                break
+        
+        if not next_url:
+            break
+        
+        response = requests.get(next_url, headers=headers)
+        data = response.json()
+        extract_data(data.get("orders", []))
     
     return sku_data
 
@@ -344,12 +363,31 @@ def build_stock_data(weighted_avg, arrivo_fornitore, magazzino_attuale, backorde
         if row["media_pesata"] <= 0:
             return 0
         vendite_previste = row["media_pesata"] * MOLTIPLICATORE_CRESCITA_VENDITE
-        fabbisogno = max(0, (GIORNI_TARGET_SCORTA - row["autonomia_tra_transito"]) * vendite_previste)
-        if fabbisogno > 0:
-            return max(10, math.ceil(fabbisogno / 10) * 10)
+        giorni_mancanti = GIORNI_TARGET_SCORTA - row["autonomia_tra_transito"]
+        fabbisogno_grezzo = max(0, giorni_mancanti * vendite_previste)
+        
+        # Log debug per SKU con fabbisogno > 0
+        if fabbisogno_grezzo > 0:
+            arrotondato = max(10, math.ceil(fabbisogno_grezzo / 10) * 10)
+            print(f"🔍 DEBUG {row['sku']}:")
+            print(f"   Magazzino netto: {row['magazzino_netto']} | Media vendite: {row['media_pesata']:.2f}/giorno")
+            print(f"   Autonomia attuale: {row['giorni_autonomia']:.1f} giorni")
+            print(f"   Autonomia tra transito: {row['autonomia_tra_transito']:.1f} giorni")
+            print(f"   Giorni da coprire: {giorni_mancanti:.1f}")
+            print(f"   Fabbisogno grezzo: {fabbisogno_grezzo:.2f} → arrotondato: {arrotondato}")
+            return arrotondato
         return 0
     
     df["fabbisogno"] = df.apply(calcola_fabbisogno, axis=1).astype(int)
+    
+    # Debug: riepilogo fabbisogni
+    df_con_fabbisogno = df[df["fabbisogno"] > 0]
+    print(f"\n📋 RIEPILOGO FABBISOGNI (Stock API):")
+    print(f"   SKU da ordinare: {len(df_con_fabbisogno)}")
+    print(f"   Totale pezzi: {df_con_fabbisogno['fabbisogno'].sum()}")
+    print(f"\n   Dettaglio:")
+    for _, row in df_con_fabbisogno.iterrows():
+        print(f"   {row['sku']}: {row['fabbisogno']} pz (autonomia: {row['giorni_autonomia']:.1f}gg, media: {row['media_pesata']:.2f}/gg)")
     
     # Urgenza
     def urgenza(giorni):
@@ -382,6 +420,14 @@ def lambda_handler(event, context):
         start_total = time.time()
         print("🚀 Inizio elaborazione stock...")
         
+        # Debug: parametri configurazione
+        print(f"⚙️  DEBUG - PARAMETRI:")
+        print(f"   Target scorta: {GIORNI_TARGET_SCORTA} giorni")
+        print(f"   Transito fornitore: {GIORNI_TRANSITO} giorni")
+        print(f"   Soglia allarme: {SOGLIA_ALLARME} giorni")
+        print(f"   Analisi vendite: {GIORNI_ANALISI_VENDITE} giorni")
+        print(f"   Moltiplicatore crescita: {MOLTIPLICATORE_CRESCITA_VENDITE}x")
+        
         # 1. Google Sheets
         service = get_google_sheets_service()
         if not service:
@@ -391,12 +437,25 @@ def lambda_handler(event, context):
         
         arrivo_fornitore = read_sheet_data(service, SHEET_ARRIVO)
         
+        # Debug: dati inventario
+        print(f"📦 DEBUG - Magazzino: {len(magazzino_attuale)} SKU, totale pezzi: {sum(magazzino_attuale.values())}")
+        print(f"📦 DEBUG - In arrivo: {len(arrivo_fornitore)} SKU, totale pezzi: {sum(arrivo_fornitore.values())}")
+        
         # 2. Shopify
         sku_data = fetch_shopify_orders(days_back=GIORNI_ANALISI_VENDITE)
+        print(f"📊 DEBUG - Ordini raccolti: {len(sku_data)} righe")
         
         weighted_avg = calculate_weighted_average(sku_data, days=GIORNI_ANALISI_VENDITE)
+        print(f"📊 DEBUG - Media pesata calcolata per {len(weighted_avg)} SKU")
         
-        backorders = {}  # Rimossi ordini arretrati per velocità
+        # Stampa top 5 SKU per media vendite
+        top_sellers = weighted_avg.nlargest(5, 'media_pesata')
+        print(f"📊 DEBUG - Top 5 SKU per vendite:")
+        for _, row in top_sellers.iterrows():
+            print(f"   {row['sku']}: {row['media_pesata']:.2f} pz/giorno")
+        
+        backorders = {}  # Non usiamo più ordini arretrati
+        print(f"⚠️  DEBUG - Backorders DISABILITATI (Stock API non li usa)")
         
         # 3. Calcola tutto
         df = build_stock_data(weighted_avg, arrivo_fornitore, magazzino_attuale, backorders)
