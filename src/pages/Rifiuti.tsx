@@ -6,6 +6,7 @@ const Rifiuti = () => {
   const [daysBack, setDaysBack] = useState<number>(4);
   const [taggingAll, setTaggingAll] = useState<boolean>(false);
   const [showPreviewModal, setShowPreviewModal] = useState<boolean>(false);
+  const [taggingProgress, setTaggingProgress] = useState<{status: 'processing' | 'updating' | 'success', current: number, total: number} | null>(null);
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['rifiuti', daysBack],
@@ -41,19 +42,39 @@ const Rifiuti = () => {
     
     console.log('✅ Confirm confermato, inizio tagging...');
     
+    // Inizializza progresso
+    setTaggingProgress({ status: 'processing', current: 0, total: orderIds.length });
+    
     // Procedi con il tagging effettivo (senza preview)
     setTaggingAll(true);
     try {
+      // Aggiorna progresso durante processamento
+      setTaggingProgress({ status: 'processing', current: 0, total: orderIds.length });
+      
       const result = await rifiutiService.tagOrdini(orderIds, false);
+      
       console.log('✅ Risultato tagging:', result);
       
-      // Ricarica i dati automaticamente
-      refetch();
+      // Passa allo stato di aggiornamento dati
+      setTaggingProgress({ status: 'updating', current: orderIds.length, total: orderIds.length });
+      
+      // Ricarica i dati immediatamente
+      await refetch();
+      
+      // Ora che i dati sono aggiornati, passa a success
+      setTaggingProgress({ status: 'success', current: orderIds.length, total: orderIds.length });
+      
+      // Mantieni il banner verde per 1 secondo
+      setTimeout(() => {
+        setTaggingAll(false);
+        setTaggingProgress(null);
+      }, 1000);
+      
     } catch (err) {
       console.error('❌ Errore tagging:', err);
       alert(`❌ Errore: ${err instanceof Error ? err.message : 'Errore sconosciuto'}`);
-    } finally {
       setTaggingAll(false);
+      setTaggingProgress(null);
     }
   };
 
@@ -124,6 +145,48 @@ const Rifiuti = () => {
           </div>
         </div>
       </div>
+
+      {/* Banner di progresso tagging */}
+      {taggingAll && taggingProgress && (
+        <div className={`alert shadow-lg mb-6 ${
+          taggingProgress.status === 'success' 
+            ? 'alert-success' 
+            : 'alert-info'
+        }`}>
+          <div className="flex items-center gap-3">
+            {taggingProgress.status === 'success' ? (
+              <svg className="w-6 h-6 text-success" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+            ) : (
+              <span className="loading loading-spinner loading-md"></span>
+            )}
+            <div>
+              <div className="font-semibold">
+                {taggingProgress.status === 'success' 
+                  ? '✅ Tag applicati con successo!'
+                  : taggingProgress.status === 'updating'
+                  ? '🔄 Aggiornando dati...'
+                  : '🏷️ Applicando tag RIFIUTO agli ordini...'
+                }
+              </div>
+              <div className="text-sm">
+                {taggingProgress.status === 'success' 
+                  ? `${taggingProgress.total} ordini taggati`
+                  : `${taggingProgress.current} / ${taggingProgress.total} ordini processati`
+                }
+              </div>
+              {taggingProgress.status === 'processing' && (
+                <progress 
+                  className="progress progress-info w-full mt-2" 
+                  value={taggingProgress.current} 
+                  max={taggingProgress.total}
+                ></progress>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-5 gap-4 mb-6">
         <div className="card bg-base-100 shadow-sm hover:shadow-md transition-shadow">

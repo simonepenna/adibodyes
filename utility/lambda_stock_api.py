@@ -46,9 +46,16 @@ import os
 import requests
 import pandas as pd
 import math
+import sys
 from datetime import datetime, timedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+
+# Aggiungi path per importare moduli locali
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'GLS'))
+
+# Import GLS per SKU ritorni
+from extract_sku_con_retorno import GLSExtranetClient, extract_sku_from_returns
 
 # ==================== CONFIGURAZIONE ====================
 
@@ -62,7 +69,7 @@ SHOPIFY_GRAPHQL_URL = f"https://{SHOP_NAME}.myshopify.com/admin/api/{SHOPIFY_API
 SHOPIFY_GRAPHQL_TOKEN = os.environ.get("SHOPIFY_GRAPHQL_TOKEN")
 
 # Parametri inventario
-GIORNI_TARGET_SCORTA = 40
+GIORNI_TARGET_SCORTA = 45
 GIORNI_TRANSITO = 21
 SOGLIA_ALLARME = GIORNI_TARGET_SCORTA + GIORNI_TRANSITO
 SOGLIA_CRITICA = 21
@@ -200,7 +207,7 @@ def fetch_backorders():
     }
     
     # Ordini arretrati ultimi 30 giorni (allineato al periodo di analisi)
-    start_date = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%d")
+    start_date = (datetime.utcnow() - timedelta(days=GIORNI_ANALISI_VENDITE)).strftime("%Y-%m-%d")
     all_orders = []
     has_next_page = True
     after_cursor = None
@@ -410,6 +417,50 @@ def build_stock_data(weighted_avg, arrivo_fornitore, magazzino_attuale, backorde
     return df
 
 
+def get_gls_returns_skus(days_back=7):
+    """
+    Recupera SKU da spedizioni GLS CON RETORNO (vendite esterne a Shopify)
+    
+    Args:
+        days_back: Giorni indietro per la ricerca
+        
+    Returns:
+        Dict con SKU: quantità da spedizioni GLS
+    """
+    try:
+        # Carica cookies GLS
+        cookies = GLSExtranetClient.load_cookies()
+        if not cookies:
+            print("⚠️ Cookies GLS non trovati, skip GLS sales")
+            return {}
+        
+        client = GLSExtranetClient(cookies)
+        
+        # Calcola date
+        today = datetime.now()
+        date_from = (today - timedelta(days=days_back)).strftime("%d/%m/%Y")
+        date_to = today.strftime("%d/%m/%Y")
+        
+        # Cerca spedizioni
+        html = client.search_shipments(date_from, date_to)
+        if not html:
+            return {}
+        
+        # Parse spedizioni
+        df = client.parse_shipments(html)
+        if df.empty:
+            return {}
+        
+        # Estrai SKU da spedizioni CON RETORNO
+        sku_sales = extract_sku_from_returns(df)
+        
+        return sku_sales
+        
+    except Exception as e:
+        print(f"⚠️ Errore recupero GLS sales: {e}")
+        return {}
+
+
 # ==================== LAMBDA HANDLER ====================
 
 def lambda_handler(event, context):
@@ -443,7 +494,36 @@ def lambda_handler(event, context):
         
         # 2. Shopify
         sku_data = fetch_shopify_orders(days_back=GIORNI_ANALISI_VENDITE)
-        print(f"📊 DEBUG - Ordini raccolti: {len(sku_data)} righe")
+        print(f"📊 DEBUG - Ordini Shopify: {len(sku_data)} righe")
+        
+        # 2.5. Aggiungi vendite GLS esterne
+        gls_sales = get_gls_returns_skus(days_back=GIORNI_ANALISI_VENDITE)  # Stesso periodo di analisi vendite Shopify
+        if gls_sales:
+            print(f"📦 DEBUG - Vendite GLS aggiunte: {len(gls_sales)} SKU, totale {sum(gls_sales.values())} pezzi")
+            print("📋 Dettaglio SKU GLS:")
+            for sku, qty in sorted(gls_sales.items(), key=lambda x: x[1], reverse=True):
+                print(f"   {sku}: {qty} pz")
+            # Spalma le vendite GLS uniformemente sui giorni di analisi vendite
+            for days_ago in range(GIORNI_ANALISI_VENDITE):
+                date_str = (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+                for sku, total_qty in gls_sales.items():
+                    # Distribuisci uniformemente ogni SKU sui giorni di analisi
+                    daily_qty = total_qty // GIORNI_ANALISI_VENDITE
+                    remainder = total_qty % GIORNI_ANALISI_VENDITE
+                    
+                    # Aggiungi il resto ai primi giorni
+                    actual_daily_qty = daily_qty + (1 if days_ago < remainder else 0)
+                    
+                    if actual_daily_qty > 0:
+                        sku_data.append({
+                            "date": date_str,
+                            "sku": sku,
+                            "total_quantity": actual_daily_qty
+                        })
+            print(f"📊 DEBUG - Vendite GLS spalmate su {GIORNI_ANALISI_VENDITE} giorni")
+            print(f"📊 DEBUG - Totale ordini dopo GLS: {len(sku_data)} righe")
+        else:
+            print("⚠️ Nessuna vendita GLS esterna trovata")
         
         weighted_avg = calculate_weighted_average(sku_data, days=GIORNI_ANALISI_VENDITE)
         print(f"📊 DEBUG - Media pesata calcolata per {len(weighted_avg)} SKU")
@@ -454,8 +534,14 @@ def lambda_handler(event, context):
         for _, row in top_sellers.iterrows():
             print(f"   {row['sku']}: {row['media_pesata']:.2f} pz/giorno")
         
-        backorders = {}  # Non usiamo più ordini arretrati
-        print(f"⚠️  DEBUG - Backorders DISABILITATI (Stock API non li usa)")
+        backorders = fetch_backorders()
+        print(f"📋 DEBUG - Ordini arretrati recuperati: {len(backorders)} SKU")
+        if backorders:
+            total_backorders = sum(backorders.values())
+            print(f"   Totale pezzi arretrati: {total_backorders}")
+            # Mostra top 5 SKU con più arretrati
+            top_backorders = sorted(backorders.items(), key=lambda x: x[1], reverse=True)[:5]
+            print(f"   Top arretrati: {top_backorders}")
         
         # 3. Calcola tutto
         df = build_stock_data(weighted_avg, arrivo_fornitore, magazzino_attuale, backorders)
@@ -558,5 +644,5 @@ if __name__ == "__main__":
             print(f"  {item['sku']}: {item['magazzino_netto']} pz, {item['giorni_autonomia']} gg")
         if data['ordine_fornitore']:
             print(f"\n🛒 Ordine fornitore ({len(data['ordine_fornitore'])} SKU):")
-            for item in data['ordine_fornitore'][:5]:
+            for item in data['ordine_fornitore']:  # Mostra tutti, non solo i primi 5
                 print(f"  {item['sku']}: {item['quantita']} pz ({item['urgenza']})")
