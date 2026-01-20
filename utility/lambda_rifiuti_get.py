@@ -176,7 +176,7 @@ class GLSExtranetClient:
 
 def fetch_shopify_orders_by_names(order_names):
     """
-    Recupera ordini Shopify specifici per nome usando GraphQL
+    Recupera ordini Shopify specifici per nome usando GraphQL con paginazione
     
     Args:
         order_names: Lista di nomi ordini (es. ['#ES7778', '#ES7779'])
@@ -192,49 +192,57 @@ def fetch_shopify_orders_by_names(order_names):
         'Content-Type': 'application/json'
     }
     
-    # Query per ordini specifici
-    names_query = ' OR '.join([f'name:{name}' for name in order_names])
-    query = f"""
-    {{
-      orders(first: 250, query: "{names_query}") {{
-        edges {{
-          node {{
-            id
-            name
-            tags
-            displayFinancialStatus
+    # Dividi gli order_names in batch da 250 (limite Shopify)
+    batch_size = 250
+    all_orders_dict = {}
+    
+    for i in range(0, len(order_names), batch_size):
+        batch_names = order_names[i:i + batch_size]
+        
+        # Query per ordini specifici nel batch corrente
+        names_query = ' OR '.join([f'name:{name}' for name in batch_names])
+        query = f"""
+        {{
+          orders(first: 250, query: "{names_query}") {{
+            edges {{
+              node {{
+                id
+                name
+                tags
+                displayFinancialStatus
+              }}
+            }}
           }}
         }}
-      }}
-    }}
-    """
+        """
+        
+        try:
+            response = requests.post(SHOPIFY_GRAPHQL_URL, headers=headers, json={"query": query})
+            data = response.json()
+            
+            if 'errors' in data:
+                print(f"⚠️ Errore Shopify batch {i//batch_size + 1}: {data['errors']}")
+                continue
+            
+            edges = data.get('data', {}).get('orders', {}).get('edges', [])
+            
+            for edge in edges:
+                order = edge['node']
+                order_name = order.get('name', '')
+                all_orders_dict[order_name] = {
+                    'id': order.get('id', ''),
+                    'financial_status': order.get('displayFinancialStatus', ''),
+                    'tags': order.get('tags', [])
+                }
+            
+            print(f"✅ Batch {i//batch_size + 1}: recuperati {len(edges)} ordini")
+            
+        except Exception as e:
+            print(f"⚠️ Errore recupero batch {i//batch_size + 1}: {e}")
+            continue
     
-    try:
-        response = requests.post(SHOPIFY_GRAPHQL_URL, headers=headers, json={"query": query})
-        data = response.json()
-        
-        if 'errors' in data:
-            print(f"⚠️ Errore Shopify: {data['errors']}")
-            return {}
-        
-        orders_dict = {}
-        edges = data.get('data', {}).get('orders', {}).get('edges', [])
-        
-        for edge in edges:
-            order = edge['node']
-            order_name = order.get('name', '')
-            orders_dict[order_name] = {
-                'id': order.get('id', ''),
-                'financial_status': order.get('displayFinancialStatus', ''),
-                'tags': order.get('tags', [])
-            }
-        
-        print(f"✅ Recuperati {len(orders_dict)} ordini specifici da Shopify")
-        return orders_dict
-        
-    except Exception as e:
-        print(f"⚠️ Errore recupero ordini Shopify: {e}")
-        return {}
+    print(f"✅ Recuperati {len(all_orders_dict)} ordini totali da Shopify ({len(order_names)} richiesti)")
+    return all_orders_dict
 
 
 def enrich_with_shopify(devoluciones):
@@ -255,7 +263,7 @@ def enrich_with_shopify(devoluciones):
     # Chiamata Shopify solo per ordini corrispondenti
     orders_dict = fetch_shopify_orders_by_names(order_names)
     
-    print(f"✅ Recuperati {len(orders_dict)} ordini da Shopify")
+    print(f"✅ Recuperati {len(orders_dict)}/{len(order_names)} ordini da Shopify")
     
     # Match in memoria per referencia
     match_count = 0
