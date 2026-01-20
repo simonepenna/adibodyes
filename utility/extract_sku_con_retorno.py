@@ -98,7 +98,12 @@ class GLSExtranetClient:
             filename: Nome del file dove salvare i cookies
         """
         cookies_dict = dict(self.session.cookies)
-        filepath = Path(__file__).parent / filename
+        
+        # In Lambda, usa /tmp per salvare i cookies (filesystem scrivibile)
+        if os.environ.get('AWS_LAMBDA_FUNCTION_NAME'):
+            filepath = Path('/tmp') / filename
+        else:
+            filepath = Path(__file__).parent / filename
         
         with open(filepath, 'w') as f:
             json.dump(cookies_dict, f, indent=2)
@@ -116,7 +121,14 @@ class GLSExtranetClient:
         Returns:
             dict: Cookies caricati
         """
-        filepath = Path(__file__).parent / filename
+        # In Lambda, cerca prima in /tmp, poi nel path normale
+        if os.environ.get('AWS_LAMBDA_FUNCTION_NAME'):
+            filepath = Path('/tmp') / filename
+            if not filepath.exists():
+                # Se non esiste in /tmp, prova nel path normale (per compatibilità)
+                filepath = Path(__file__).parent / filename
+        else:
+            filepath = Path(__file__).parent / filename
         
         if not filepath.exists():
             print(f"⚠️ File {filepath} non trovato")
@@ -220,9 +232,14 @@ class GLSExtranetClient:
         
         if response.status_code != 200:
             # Salva response per debug anche in caso di errore
-            with open('extranet_response_error.html', 'w', encoding='utf-8') as f:
+            if os.environ.get('AWS_LAMBDA_FUNCTION_NAME'):
+                error_path = Path('/tmp') / 'extranet_response_error.html'
+            else:
+                error_path = Path('extranet_response_error.html')
+            
+            with open(error_path, 'w', encoding='utf-8') as f:
                 f.write(response.text)
-            print(f"💾 Response errore salvata in extranet_response_error.html")
+            print(f"💾 Response errore salvata in {error_path}")
             raise Exception(f"Errore ricerca: {response.status_code}")
         
         # Response in memoria - no salvataggio su file per velocità

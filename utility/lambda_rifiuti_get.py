@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 import os
 import time
 
-# CONFIGURAZIONE
+# CONFIGURAZIONE - Variabili d'ambiente per Lambda
 SHOPIFY_ACCESS_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN')
 SHOP_NAME = os.environ.get("SHOPIFY_SHOP_NAME", "db806d-07")
 SHOPIFY_API_VERSION = "2024-04"
@@ -174,120 +174,91 @@ class GLSExtranetClient:
         return shipments
 
 
-def fetch_shopify_orders_bulk(days_back=60):
+def fetch_shopify_orders_by_names(order_names):
     """
-    Recupera TUTTI gli ordini Shopify degli ultimi 60 giorni specificati usando paginazione
-    Ordinati per data creazione decrescente (più recenti prima)
+    Recupera ordini Shopify specifici per nome usando GraphQL
     
     Args:
-        days_back: Numero di giorni indietro
+        order_names: Lista di nomi ordini (es. ['#ES7778', '#ES7779'])
         
     Returns:
         Dict con order_name come chiave e info ordine come valore
     """
+    if not order_names:
+        return {}
+    
     headers = {
         'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
         'Content-Type': 'application/json'
     }
     
-    # Calcola data di inizio
-    date_from = datetime.now() - timedelta(days=days_back)
-    date_from_str = date_from.strftime("%Y-%m-%d")
-    
-    print(f"🔍 Query Shopify: TUTTI gli ordini degli ultimi {days_back} giorni (paginazione)")
-    
-    all_orders = []
-    has_next_page = True
-    after_cursor = None
-    
-    while has_next_page:
-        cursor_part = f', after: "{after_cursor}"' if after_cursor else ''
-        query = f"""
-        {{
-          orders(first: 250{cursor_part}, sortKey: CREATED_AT, reverse: true, query: "created_at:>={date_from_str}") {{
-            pageInfo {{
-              hasNextPage
-            }}
-            edges {{
-              cursor
-              node {{
-                id
-                name
-                tags
-                displayFinancialStatus
-              }}
-            }}
+    # Query per ordini specifici
+    names_query = ' OR '.join([f'name:{name}' for name in order_names])
+    query = f"""
+    {{
+      orders(first: 250, query: "{names_query}") {{
+        edges {{
+          node {{
+            id
+            name
+            tags
+            displayFinancialStatus
           }}
         }}
-        """
+      }}
+    }}
+    """
+    
+    try:
+        response = requests.post(SHOPIFY_GRAPHQL_URL, headers=headers, json={"query": query})
+        data = response.json()
         
-        try:
-            response = requests.post(SHOPIFY_GRAPHQL_URL, headers=headers, json={"query": query})
-            data = response.json()
-            
-            if 'errors' in data:
-                print(f"⚠️ Errore Shopify: {data['errors']}")
-                return {}
-            
-            batch = data.get('data', {}).get('orders', {})
-            edges = batch.get('edges', [])
-            all_orders.extend(edges)
-            
-            has_next_page = batch.get('pageInfo', {}).get('hasNextPage', False)
-            if has_next_page and edges:
-                after_cursor = edges[-1]['cursor']
-            else:
-                has_next_page = False
-                
-        except Exception as e:
-            print(f"⚠️ Errore recupero batch ordini: {e}")
-            break
-    
-    # Crea dict con name come chiave
-    orders_dict = {}
-    for edge in all_orders:
-        order = edge['node']
-        order_name = order.get('name', '')
-        orders_dict[order_name] = {
-            'id': order.get('id', ''),
-            'financial_status': order.get('displayFinancialStatus', ''),
-            'tags': order.get('tags', [])
-        }
-    
-    print(f"✅ Recuperati {len(orders_dict)} ordini totali da Shopify")
-    
-    # DEBUG: mostra range ordini recuperati
-    if orders_dict:
-        order_names = list(orders_dict.keys())
-        print(f"🔍 Range ordini: da {order_names[0]} a {order_names[-1]}")
-    
-    return orders_dict
+        if 'errors' in data:
+            print(f"⚠️ Errore Shopify: {data['errors']}")
+            return {}
+        
+        orders_dict = {}
+        edges = data.get('data', {}).get('orders', {}).get('edges', [])
+        
+        for edge in edges:
+            order = edge['node']
+            order_name = order.get('name', '')
+            orders_dict[order_name] = {
+                'id': order.get('id', ''),
+                'financial_status': order.get('displayFinancialStatus', ''),
+                'tags': order.get('tags', [])
+            }
+        
+        print(f"✅ Recuperati {len(orders_dict)} ordini specifici da Shopify")
+        return orders_dict
+        
+    except Exception as e:
+        print(f"⚠️ Errore recupero ordini Shopify: {e}")
+        return {}
 
 
 def enrich_with_shopify(devoluciones):
-    """Arricchisce devoluciones con info Shopify (ultimi 60 giorni)"""
+    """Arricchisce devoluciones con info Shopify (solo ordini corrispondenti)"""
     if not devoluciones:
         return devoluciones
     
-    # Chiamata Shopify con periodo di 60 giorni
-    orders_dict = fetch_shopify_orders_bulk(days_back=60)
+    # Raccogli tutte le referencias uniche
+    referencias = [d.get('referencia', '') for d in devoluciones if d.get('referencia', '')]
+    order_names = [f"#ES{ref}" for ref in referencias if ref]
+    
+    if not order_names:
+        print("⚠️ Nessuna referencia valida trovata")
+        return devoluciones
+    
+    print(f"🔍 Query Shopify: {len(order_names)} ordini specifici")
+    
+    # Chiamata Shopify solo per ordini corrispondenti
+    orders_dict = fetch_shopify_orders_by_names(order_names)
     
     print(f"✅ Recuperati {len(orders_dict)} ordini da Shopify")
     
-    # DEBUG: stampa primi 5 ordini per vedere formato
-    if orders_dict:
-        print("🔍 DEBUG primi 5 ordini Shopify:")
-        for i, order_name in enumerate(list(orders_dict.keys())[:5]):
-            print(f"   {i+1}. {order_name}")
-    
     # Match in memoria per referencia
     match_count = 0
-    
-    # DEBUG: stampa prime 5 referencias GLS cercate
-    print("🔍 DEBUG prime 5 referencias GLS:")
-    for i, dev in enumerate(devoluciones[:5]):
-        ref = dev.get('referencia', '')
-        print(f"   {i+1}. referencia='{ref}' -> order_name='#ES{ref}'")
     
     for devolucion in devoluciones:
         referencia = devolucion.get('referencia', '')
