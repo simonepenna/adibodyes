@@ -115,6 +115,7 @@ const Rifiuti = () => {
             <option value={7}>7 giorni</option>
             <option value={14}>14 giorni</option>
             <option value={30}>30 giorni</option>
+            <option value={45}>45 giorni</option>
           </select>
         </div>
 
