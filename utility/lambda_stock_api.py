@@ -59,6 +59,9 @@ from extract_sku_con_retorno import GLSExtranetClient, extract_sku_from_returns
 
 # ==================== CONFIGURAZIONE ====================
 
+# Abilita/disabilita controllo spedizioni GLS
+ENABLE_GLS_CHECKS = os.environ.get("ENABLE_GLS_CHECKS", "True").lower() == "true"
+
 # Shopify API
 SHOP_NAME = os.environ.get("SHOPIFY_SHOP_NAME", "db806d-07")
 SHOPIFY_ACCESS_TOKEN = os.environ.get("SHOPIFY_ACCESS_TOKEN")
@@ -276,7 +279,16 @@ def calculate_weighted_average(sku_data, days=10):
     if df.empty:
         return pd.DataFrame(columns=["sku", "media_pesata"])
     
-    df["date"] = pd.to_datetime(df["created_at"], utc=True).dt.date
+    # Unifica le date: Shopify usa "created_at" (ISO datetime), GLS usa "date" (YYYY-MM-DD)
+    def extract_date(row):
+        if pd.notna(row.get("created_at")):
+            return pd.to_datetime(row["created_at"], utc=True).date()
+        elif pd.notna(row.get("date")):
+            return pd.to_datetime(row["date"]).date()
+        else:
+            return None
+    
+    df["date"] = df.apply(extract_date, axis=1)
     
     grouped = (
         df.groupby(["date", "sku"])
@@ -425,14 +437,15 @@ def get_gls_returns_skus(days_back=7):
         days_back: Giorni indietro per la ricerca
         
     Returns:
-        Dict con SKU: quantità da spedizioni GLS
+        List di dict con formato: [{"sku": "SLIP.XL.BL", "quantity": 2, "date": "2026-01-15"}, ...]
     """
+    import time
     try:
         # Carica cookies GLS
         cookies = GLSExtranetClient.load_cookies()
         if not cookies:
             print("⚠️ Cookies GLS non trovati, skip GLS sales")
-            return {}
+            return []
         
         client = GLSExtranetClient(cookies)
         
@@ -441,24 +454,86 @@ def get_gls_returns_skus(days_back=7):
         date_from = (today - timedelta(days=days_back)).strftime("%d/%m/%Y")
         date_to = today.strftime("%d/%m/%Y")
         
-        # Cerca spedizioni
+        # Cerca spedizioni (HTTP request)
+        t_http = time.time()
         html = client.search_shipments(date_from, date_to)
+        http_time = time.time() - t_http
+        print(f"   ⏱️ HTTP request GLS: {http_time:.2f}s")
+        
         if not html:
-            return {}
+            return []
         
-        # Parse spedizioni
+        # Parse spedizioni (CPU-intensive)
+        t_parse = time.time()
         df = client.parse_shipments(html)
+        parse_time = time.time() - t_parse
+        print(f"   ⏱️ Parsing HTML: {parse_time:.2f}s")
+        
         if df.empty:
-            return {}
+            return []
         
-        # Estrai SKU da spedizioni CON RETORNO
-        sku_sales = extract_sku_from_returns(df)
+        # Estrai SKU da spedizioni CON RETORNO con date
+        t_extract = time.time()
+        sku_sales_with_dates = extract_sku_from_returns_with_dates(df)
+        extract_time = time.time() - t_extract
+        print(f"   ⏱️ Elaborazione dati: {extract_time:.2f}s")
         
-        return sku_sales
+        return sku_sales_with_dates
         
     except Exception as e:
         print(f"⚠️ Errore recupero GLS sales: {e}")
-        return {}
+        return []
+
+
+def extract_sku_from_returns_with_dates(df):
+    """
+    Estrae SKU dalle spedizioni con "CON RETORNO" mantenendo la data di ogni spedizione
+    
+    Args:
+        df: DataFrame delle spedizioni con colonna 'Fecha'
+        
+    Returns:
+        List di dict con formato: [{"sku": "SLIP.XL.BL", "quantity": 2, "date": "2026-01-15"}, ...]
+    """
+    from collections import defaultdict
+    
+    sku_sales_list = []
+    
+    # Filtra spedizioni con "CON RETORNO"
+    returns_df = df[df['retorno'].str.upper().str.contains('CON RETORNO', na=False)].copy()
+    
+    print(f"🔄 Analisi di {len(returns_df)} spedizioni con 'CON RETORNO'...\n")
+    
+    for idx, row in returns_df.iterrows():
+        observacion = str(row.get('observacion', '')).strip()
+        fecha = row.get('Fecha', '')
+        
+        # Converti data da formato DD/MM/YYYY a YYYY-MM-DD
+        try:
+            if fecha:
+                date_obj = datetime.strptime(str(fecha), "%d/%m/%Y")
+                date_str = date_obj.strftime("%Y-%m-%d")
+            else:
+                date_str = datetime.now().strftime("%Y-%m-%d")
+        except:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+        
+        if not observacion:
+            continue
+        
+        # Parse SKU dalla osservazione - crea un mini-df per la funzione esistente
+        mini_df = pd.DataFrame([row])
+        skus_in_shipment = extract_sku_from_returns(mini_df)
+        
+        for sku, qty in skus_in_shipment.items():
+            if sku:
+                sku_sales_list.append({
+                    "sku": sku,
+                    "quantity": qty,
+                    "date": date_str
+                })
+    
+    return sku_sales_list
 
 
 # ==================== LAMBDA HANDLER ====================
@@ -467,17 +542,7 @@ def lambda_handler(event, context):
     """Handler Lambda - restituisce stock + ordine fornitore"""
     
     try:
-        import time
-        start_total = time.time()
         print("🚀 Inizio elaborazione stock...")
-        
-        # Debug: parametri configurazione
-        print(f"⚙️  DEBUG - PARAMETRI:")
-        print(f"   Target scorta: {GIORNI_TARGET_SCORTA} giorni")
-        print(f"   Transito fornitore: {GIORNI_TRANSITO} giorni")
-        print(f"   Soglia allarme: {SOGLIA_ALLARME} giorni")
-        print(f"   Analisi vendite: {GIORNI_ANALISI_VENDITE} giorni")
-        print(f"   Moltiplicatore crescita: {MOLTIPLICATORE_CRESCITA_VENDITE}x")
         
         # 1. Google Sheets
         service = get_google_sheets_service()
@@ -485,63 +550,25 @@ def lambda_handler(event, context):
             raise Exception("Impossibile connettersi a Google Sheets")
         
         magazzino_attuale = read_sheet_data(service, SHEET_MAGAZZINO)
-        
         arrivo_fornitore = read_sheet_data(service, SHEET_ARRIVO)
-        
-        # Debug: dati inventario
-        print(f"📦 DEBUG - Magazzino: {len(magazzino_attuale)} SKU, totale pezzi: {sum(magazzino_attuale.values())}")
-        print(f"📦 DEBUG - In arrivo: {len(arrivo_fornitore)} SKU, totale pezzi: {sum(arrivo_fornitore.values())}")
         
         # 2. Shopify
         sku_data = fetch_shopify_orders(days_back=GIORNI_ANALISI_VENDITE)
-        print(f"📊 DEBUG - Ordini Shopify: {len(sku_data)} righe")
         
-        # 2.5. Aggiungi vendite GLS esterne
-        gls_sales = get_gls_returns_skus(days_back=GIORNI_ANALISI_VENDITE)  # Stesso periodo di analisi vendite Shopify
-        if gls_sales:
-            print(f"📦 DEBUG - Vendite GLS aggiunte: {len(gls_sales)} SKU, totale {sum(gls_sales.values())} pezzi")
-            print("📋 Dettaglio SKU GLS:")
-            for sku, qty in sorted(gls_sales.items(), key=lambda x: x[1], reverse=True):
-                print(f"   {sku}: {qty} pz")
-            # Spalma le vendite GLS uniformemente sui giorni di analisi vendite
-            for days_ago in range(GIORNI_ANALISI_VENDITE):
-                date_str = (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%d")
-                for sku, total_qty in gls_sales.items():
-                    # Distribuisci uniformemente ogni SKU sui giorni di analisi
-                    daily_qty = total_qty // GIORNI_ANALISI_VENDITE
-                    remainder = total_qty % GIORNI_ANALISI_VENDITE
-                    
-                    # Aggiungi il resto ai primi giorni
-                    actual_daily_qty = daily_qty + (1 if days_ago < remainder else 0)
-                    
-                    if actual_daily_qty > 0:
-                        sku_data.append({
-                            "date": date_str,
-                            "sku": sku,
-                            "total_quantity": actual_daily_qty
-                        })
-            print(f"📊 DEBUG - Vendite GLS spalmate su {GIORNI_ANALISI_VENDITE} giorni")
-            print(f"📊 DEBUG - Totale ordini dopo GLS: {len(sku_data)} righe")
-        else:
-            print("⚠️ Nessuna vendita GLS esterna trovata")
+        # 2.5. Aggiungi vendite GLS esterne (se abilitato)
+        if ENABLE_GLS_CHECKS:
+            gls_sales_list = get_gls_returns_skus(days_back=GIORNI_ANALISI_VENDITE)
+            if gls_sales_list:
+                # Aggiungi le vendite GLS
+                for item in gls_sales_list:
+                    sku_data.append({
+                        "created_at": item['date'],
+                        "sku": item['sku'],
+                        "current_quantity": item['quantity']
+                    })
         
         weighted_avg = calculate_weighted_average(sku_data, days=GIORNI_ANALISI_VENDITE)
-        print(f"📊 DEBUG - Media pesata calcolata per {len(weighted_avg)} SKU")
-        
-        # Stampa top 5 SKU per media vendite
-        top_sellers = weighted_avg.nlargest(5, 'media_pesata')
-        print(f"📊 DEBUG - Top 5 SKU per vendite:")
-        for _, row in top_sellers.iterrows():
-            print(f"   {row['sku']}: {row['media_pesata']:.2f} pz/giorno")
-        
         backorders = fetch_backorders()
-        print(f"📋 DEBUG - Ordini arretrati recuperati: {len(backorders)} SKU")
-        if backorders:
-            total_backorders = sum(backorders.values())
-            print(f"   Totale pezzi arretrati: {total_backorders}")
-            # Mostra top 5 SKU con più arretrati
-            top_backorders = sorted(backorders.items(), key=lambda x: x[1], reverse=True)[:5]
-            print(f"   Top arretrati: {top_backorders}")
         
         # 3. Calcola tutto
         df = build_stock_data(weighted_avg, arrivo_fornitore, magazzino_attuale, backorders)
@@ -596,9 +623,7 @@ def lambda_handler(event, context):
             "timestamp": datetime.now().isoformat()
         }
         
-        total_time = time.time() - start_total
         print(f"✅ Completato: {len(stock_list)} SKU, {len(ordine_list)} da ordinare")
-        print(f"⏱️  TEMPO TOTALE: {total_time:.2f}s")
         
         return {
             'statusCode': 200,

@@ -7,7 +7,7 @@ WORKDIR ${LAMBDA_TASK_ROOT}
 # Copia i file necessari
 COPY web/utility/lambda_stock_api.py ${LAMBDA_TASK_ROOT}/
 COPY web/utility/shopify-lambda-integration-ff8f0760340f.json ${LAMBDA_TASK_ROOT}/
-COPY GLS/extract_sku_con_retorno.py ${LAMBDA_TASK_ROOT}/GLS/extract_sku_con_retorno.py
+COPY web/utility/extract_sku_con_retorno.py ${LAMBDA_TASK_ROOT}/
 
 # Installa le dipendenze
 RUN pip install --upgrade pip --trusted-host pypi.org --trusted-host files.pythonhosted.org && \

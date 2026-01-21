@@ -32,9 +32,7 @@ if [ $? -ne 0 ]; then
 fi
 
 echo "🏗️  Building Docker image for x86_64..."
-cd web/utility
-docker buildx build --platform linux/amd64 --provenance=false --output type=docker -t $REPOSITORY_NAME -f Dockerfile.stock ../..
-cd ..
+docker buildx build --platform linux/amd64 --provenance=false --output type=docker -t $REPOSITORY_NAME -f web/utility/Dockerfile.stock .
 
 if [ $? -ne 0 ]; then
     echo "❌ Errore durante il build dell'immagine"

@@ -113,7 +113,7 @@ class GLSExtranetClient:
     @staticmethod
     def load_cookies(filename='gls_cookies.json'):
         """
-        Carica i cookies da un file
+        Carica i cookies da un file o da variabile d'ambiente
         
         Args:
             filename: Nome del file da cui caricare i cookies
@@ -121,6 +121,17 @@ class GLSExtranetClient:
         Returns:
             dict: Cookies caricati
         """
+        # Prova prima da variabile d'ambiente (per Lambda)
+        cookies_json = os.environ.get('GLS_COOKIES_JSON')
+        if cookies_json:
+            try:
+                cookies = json.loads(cookies_json)
+                print(f"📂 Cookies caricati da variabile d'ambiente GLS_COOKIES_JSON")
+                return cookies
+            except json.JSONDecodeError as e:
+                print(f"⚠️ Errore parsing GLS_COOKIES_JSON: {e}")
+        
+        # Se non c'è variabile d'ambiente, carica da file
         # In Lambda, cerca prima in /tmp, poi nel path normale
         if os.environ.get('AWS_LAMBDA_FUNCTION_NAME'):
             filepath = Path('/tmp') / filename
@@ -251,7 +262,8 @@ class GLSExtranetClient:
     
     def parse_shipments(self, html_content):
         """
-        Estrae le spedizioni dalla pagina HTML
+        Estrae le spedizioni dalla pagina HTML - versione ottimizzata
+        Pre-filtra l'HTML per parsare solo righe con "CON RETORNO"
         
         Args:
             html_content: HTML della risposta
@@ -259,75 +271,67 @@ class GLSExtranetClient:
         Returns:
             pandas DataFrame con info spedizioni
         """
-        # Le spedizioni sono nella tabella principale con id="gr"
-        soup = BeautifulSoup(html_content, 'html.parser')
+        import re
         
-        # Cerca la tabella anche nei commenti HTML
-        main_table = soup.find('table', id='gr')
-        if not main_table:
-            # Cerca nei commenti HTML che contengono la tabella
-            html_text = str(soup)
-            # Trova il commento che contiene 'id="gr"'
-            start_comment = html_text.find('<!--')
-            if start_comment != -1:
-                # Cerca tutti i commenti e trova quello che contiene la tabella
-                comment_end = html_text.find('-->', start_comment + 4)
-                while comment_end != -1:
-                    comment_content = html_text[start_comment:comment_end + 3]
-                    if 'id="gr"' in comment_content:
-                        # Estrai solo il contenuto della tabella dal commento
-                        table_start = comment_content.find('<table')
-                        table_end = comment_content.find('</table>') + 8
-                        if table_start != -1 and table_end != -1:
-                            table_html = comment_content[table_start:table_end]
-                            # Parse la tabella
-                            table_soup = BeautifulSoup(table_html, 'html.parser')
-                            main_table = table_soup.find('table', id='gr')
-                            break
-                    # Cerca il prossimo commento
-                    start_comment = html_text.find('<!--', comment_end + 3)
-                    if start_comment == -1:
-                        break
-                    comment_end = html_text.find('-->', start_comment + 4)
+        # OTTIMIZZAZIONE: Estrai headers con regex (no BeautifulSoup)
+        header_pattern = re.compile(r'<tr[^>]*class=["\']gv-header["\'][^>]*>(.*?)</tr>', re.DOTALL | re.IGNORECASE)
+        header_match = header_pattern.search(html_content)
         
-        if not main_table:
-            print("⚠️ Tabella principale 'gr' non trovata")
+        if not header_match:
+            print("⚠️ Header non trovato")
             return pd.DataFrame()
         
-        # Estrai headers
-        header_row = main_table.find('tr', class_='gv-header')
-        if not header_row:
-            print("⚠️ Header della tabella non trovato")
+        # Estrai i nomi delle colonne dai <th>
+        th_pattern = re.compile(r'<th[^>]*>(.*?)</th>', re.DOTALL | re.IGNORECASE)
+        headers = []
+        for th_match in th_pattern.finditer(header_match.group(1)):
+            # Rimuovi tag HTML interni e strip
+            header_text = re.sub(r'<[^>]+>', '', th_match.group(1)).strip()
+            headers.append(header_text)
+        
+        print(f"✅ Headers trovati con regex: {len(headers)} colonne")
+        
+        # OTTIMIZZAZIONE: Pre-filtra righe HTML con "CON RETORNO" usando regex
+        filtered_rows = []
+        tr_pattern = re.compile(r'<tr[^>]*class=["\'](?:gv-row|gv-alternating)["\'][^>]*>.*?</tr>', re.DOTALL | re.IGNORECASE)
+        
+        for match in tr_pattern.finditer(html_content):
+            row_html = match.group(0)
+            if 'CON RETORNO' in row_html.upper():
+                filtered_rows.append(row_html)
+        
+        print(f"🔍 Pre-filtro: {len(filtered_rows)} righe con 'CON RETORNO' (vs 723 totali)")
+        
+        if not filtered_rows:
             return pd.DataFrame()
         
-        headers = [th.get_text(strip=True) for th in header_row.find_all('th')]
-        print(f"✅ Headers trovati: {headers}")
-        
-        # Estrai righe dati
-        data_rows = main_table.find_all('tr', class_=['gv-row', 'gv-alternating'])
-        print(f"✅ Trovate {len(data_rows)} spedizioni")
-        
+        # OTTIMIZZAZIONE: Parsa SOLO le righe filtrate (no parsing completo)
+        print(f"⏱️ Parsing {len(filtered_rows)} righe filtrate (no full HTML parse)")
         shipments = []
         
-        for row in data_rows:
+        for row_html in filtered_rows:
             try:
-                cells = row.find_all('td')
+                # Pattern per estrarre celle <td>
+                td_pattern = re.compile(r'<td[^>]*>(.*?)</td>', re.DOTALL | re.IGNORECASE)
+                cells = []
+                
+                for td_match in td_pattern.finditer(row_html):
+                    # Rimuovi tag HTML interni e strip
+                    cell_text = re.sub(r'<[^>]+>', '', td_match.group(1)).strip()
+                    cells.append(cell_text)
+                
                 if len(cells) != len(headers):
                     continue
                 
                 shipment = {}
                 for i, cell in enumerate(cells):
-                    header = headers[i]
-                    value = cell.get_text(strip=True)
-                    shipment[header] = value
+                    shipment[headers[i]] = cell
                 
                 shipments.append(shipment)
-                
-            except Exception as e:
-                print(f"⚠️ Errore parsing riga: {e}")
+            except:
                 continue
         
-        print(f"✅ Estratte {len(shipments)} spedizioni")
+        print(f"✅ Estratte {len(shipments)} spedizioni (parsing regex puro)")
         
         # Crea DataFrame
         df = pd.DataFrame(shipments)
@@ -378,8 +382,6 @@ def extract_sku_from_returns(df):
     
     # Filtra spedizioni con "CON RETORNO"
     returns_df = df[df['retorno'].str.upper().str.contains('CON RETORNO', na=False)].copy()
-    
-    print(f"🔄 Analisi di {len(returns_df)} spedizioni con 'CON RETORNO'...\n")
     
     for idx, row in returns_df.iterrows():
         observacion = str(row.get('observacion', '')).strip()
@@ -438,17 +440,58 @@ def parse_skus_from_observacion(observacion):
                 # Pulisci SKU (rimuovi spazi extra, etc.)
                 sku = sku_part.upper().replace(' ', '')
                 
+                # Normalizza SKU (corregge errori comuni)
+                sku = normalize_sku(sku)
+                
                 # Valida SKU
                 if is_valid_sku(sku):
                     skus[sku] = qty
         else:
             # Nessun 'x', assume qty=1
             sku = item.upper().replace(' ', '')
+            # Normalizza SKU (corregge errori comuni)
+            sku = normalize_sku(sku)
             # Valida SKU
             if is_valid_sku(sku):
                 skus[sku] = 1
     
     return dict(skus)
+
+
+def normalize_sku(sku):
+    """
+    Normalizza SKU correggendo errori comuni
+    
+    Args:
+        sku: SKU da normalizzare
+        
+    Returns:
+        str: SKU normalizzato
+    """
+    if not sku:
+        return sku
+    
+    # Correggi pattern SLIPM -> SLIP.M, SLIPS -> SLIP.S, ecc.
+    import re
+    
+    # Pattern: SLIP seguito direttamente da taglia (senza punto)
+    # Es: SLIPM.BE -> SLIP.M.BE, SLIPXL.BL -> SLIP.XL.BL
+    sizes = ['XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL']
+    for size in sizes:
+        # Pattern: SLIP + taglia senza punto prima
+        pattern = f'SLIP{size}\\.'
+        if re.search(pattern, sku):
+            sku = re.sub(pattern, f'SLIP.{size}.', sku)
+            break
+    
+    # Stesso per PER
+    for size in sizes:
+        pattern = f'PER{size}\\.'
+        if re.search(pattern, sku):
+            sku = re.sub(pattern, f'PER.{size}.', sku)
+            break
+    
+    return sku
 
 
 def is_valid_sku(sku):
