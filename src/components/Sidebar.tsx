@@ -13,6 +13,7 @@ const Sidebar = ({ isOpen, setIsOpen }: SidebarProps) => {
     { name: 'Stock', href: '/stock', icon: '📦' },
     { name: 'Evasione', href: '/evasione', icon: '🚚' },
     { name: 'Rifiuti', href: '/rifiuti', icon: '♻️' },
+    { name: 'GLS Parcel Shop', href: '/gls-parcel-shop', icon: '🏪' },
   ];
 
   return (

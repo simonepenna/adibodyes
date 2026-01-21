@@ -42,6 +42,8 @@ const Header = ({ onMenuClick }: HeaderProps) => {
         return 'Evasione';
       case '/rifiuti':
         return 'Rifiuti';
+      case '/gls-parcel-shop':
+        return 'GLS Parcel Shop';
       default:
         return 'Dashboard';
     }
