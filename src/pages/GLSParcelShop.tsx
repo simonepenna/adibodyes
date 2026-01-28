@@ -11,7 +11,7 @@ const GLSParcelShop = () => {
     document.title = 'GLS Parcel Shop - Dashboard';
   }, []);
 
-  const { data, isLoading, error, refetch } = useQuery({
+  const { data, isLoading, error } = useQuery({
     queryKey: ['gls-parcel-shop', daysBack],
     queryFn: () => fetchGLSParcelShopData(daysBack),
   });
