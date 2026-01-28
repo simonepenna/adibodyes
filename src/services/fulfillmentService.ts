@@ -20,6 +20,7 @@ export interface ShippingAddress {
   province?: string;
   zip?: string;
   country?: string;
+  phone?: string;
 }
 
 export interface FulfillmentOrder {

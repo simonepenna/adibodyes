@@ -116,12 +116,14 @@ def get_unfulfilled_orders_shopify(days_back=7):
             customer {{
               firstName
               lastName
+              phone
             }}
             shippingAddress {{
               address1
               address2
               city
               zip
+              phone
             }}
             totalPriceSet {{
               shopMoney {{
