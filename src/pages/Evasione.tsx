@@ -146,8 +146,9 @@ const Evasione = () => {
       {/* Tabella Unica con tutti gli ordini */}
       <div className="card bg-base-100 shadow-sm hover:shadow-md transition-shadow">
         <div className="card-body">
+          <h2 className="card-title font-bold">Ordini da Evadere</h2>
           <div className="overflow-x-auto">
-            <table className="table">
+            <table className="table table-zebra">
               <thead>
                 <tr>
                   <th className="text-base">Ordine</th>
@@ -165,11 +166,11 @@ const Evasione = () => {
               <tbody>
                 {allOrders.map((order) => (
                   <tr key={order.id} className="hover">
-                    <td className="font-mono font-bold text-base">{order.name}</td>
-                    <td className="text-base">{new Date(order.created_at).toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit' })}</td>
-                    <td className="text-base">{order.customer_name}</td>
+                    <td className="font-mono font-medium">{order.name}</td>
+                    <td className="text-sm">{new Date(order.created_at).toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit' })}</td>
+                    <td className="font-medium">{order.customer_name}</td>
                     <td className="text-sm max-w-xs truncate">{formatAddress(order)}</td>
-                    <td className="text-base">€{parseFloat(order.total_price).toFixed(2)}</td>
+                    <td className="text-sm">€{parseFloat(order.total_price).toFixed(2)}</td>
                     <td>
                       <span className="badge badge-sm badge-ghost">
                         {order.financial_status}
