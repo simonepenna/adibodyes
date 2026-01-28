@@ -193,7 +193,7 @@ const Evasione = () => {
                           : 'ninguna talla disponible';
                         return (
                           <a
-                            href={`https://api.whatsapp.com/send?phone=${encodeURIComponent(phone)}&text=${encodeURIComponent(
+                            href={`https://web.whatsapp.com/send?phone=${encodeURIComponent(phone)}&text=${encodeURIComponent(
                               `Buenos días, ${firstName}.\n` +
                               `Somos el equipo de AdiBody.\n` +
                               `¿Podrías confirmarnos, por favor, las tallas del pedido?\n` +

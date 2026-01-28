@@ -149,7 +149,7 @@ const GLSParcelShop = () => {
                       <td className="text-center">
                         {shipment.phone ? (
                           <a
-                            href={`https://api.whatsapp.com/send?phone=${encodeURIComponent(shipment.phone.replace(/\D/g, ''))}&text=${encodeURIComponent(
+                            href={`https://web.whatsapp.com/send?phone=${encodeURIComponent(shipment.phone.replace(/\D/g, ''))}&text=${encodeURIComponent(
                               `¡Hola ${shipment.destinatario.split(' ')[0]}! Somos el equipo de AdiBody.\n\n` +
                               `Tu paquete ha sido entregado en un ParcelShop GLS.\n` +
                               `Puedes pasar a recogerlo cuando quieras.\n\n` +
