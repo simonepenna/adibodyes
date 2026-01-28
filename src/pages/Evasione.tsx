@@ -8,7 +8,7 @@ const Evasione = () => {
 
   // Aggiorna il titolo della pagina
   useEffect(() => {
-    document.title = 'AdiBody ES - Evasione Ordini';
+    document.title = 'AdiBody ES - Evasione';
   }, []);
 
   const { data, isLoading, error } = useQuery({
