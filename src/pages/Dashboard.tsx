@@ -1,9 +1,13 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getOrderStats } from '../services/shopifyService';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 
 const Dashboard = () => {
+  // Aggiorna il titolo della pagina
+  useEffect(() => {
+    document.title = 'AdiBody ES - Dashboard';
+  }, []);
   const [dateRange, setDateRange] = useState<'today' | '7days' | '30days' | '60days' | '90days' | 'custom'>('30days');
   const [customStartDate, setCustomStartDate] = useState('');
   const [customEndDate, setCustomEndDate] = useState('');

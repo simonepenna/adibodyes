@@ -1,4 +1,10 @@
+import { useEffect } from 'react';
+
 const Settings = () => {
+  // Aggiorna il titolo della pagina
+  useEffect(() => {
+    document.title = 'AdiBody ES - Settings';
+  }, []);
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">

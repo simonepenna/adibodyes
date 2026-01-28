@@ -1,8 +1,12 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import rifiutiService from '../services/rifiutiService';
 
 const Rifiuti = () => {
+  // Aggiorna il titolo della pagina
+  useEffect(() => {
+    document.title = 'AdiBody ES - Rifiuti';
+  }, []);
   const [daysBack, setDaysBack] = useState<number>(4);
   const [taggingAll, setTaggingAll] = useState<boolean>(false);
   const [showPreviewModal, setShowPreviewModal] = useState<boolean>(false);

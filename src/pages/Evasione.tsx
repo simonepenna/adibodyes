@@ -1,10 +1,15 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { fetchFulfillmentData } from '../services/fulfillmentService';
 import type { FulfillmentOrder } from '../services/fulfillmentService';
 
 const Evasione = () => {
   const [days, setDays] = useState(4);
+
+  // Aggiorna il titolo della pagina
+  useEffect(() => {
+    document.title = 'AdiBody ES - Evasione Ordini';
+  }, []);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['fulfillment', days],

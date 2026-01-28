@@ -1,7 +1,12 @@
+import { useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { fetchStockData } from '../services/stockService';
 
 const Stock = () => {
+  // Aggiorna il titolo della pagina
+  useEffect(() => {
+    document.title = 'AdiBody ES - Stock';
+  }, []);
   const { data, isLoading, error } = useQuery({
     queryKey: ['stock'],
     queryFn: fetchStockData,

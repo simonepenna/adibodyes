@@ -8,7 +8,7 @@ const GLSParcelShop = () => {
 
   // Aggiorna il titolo della pagina
   useEffect(() => {
-    document.title = 'GLS Parcel Shop - Dashboard';
+    document.title = 'AdiBody ES - GLS Parcel Shop';
   }, []);
 
   const { data, isLoading, error } = useQuery({
