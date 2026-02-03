@@ -8,6 +8,7 @@ import Stock from './pages/Stock';
 import Evasione from './pages/Evasione';
 import Rifiuti from './pages/Rifiuti';
 import GLSParcelShop from './pages/GLSParcelShop';
+import Rimborsi from './pages/Rimborsi';
 import Login from './components/Login';
 import './aws-config';
 
@@ -74,6 +75,7 @@ function App() {
               <Route path="/evasione" element={<Evasione />} />
               <Route path="/rifiuti" element={<Rifiuti />} />
               <Route path="/gls-parcel-shop" element={<GLSParcelShop />} />
+              <Route path="/rimborsi" element={<Rimborsi />} />
               <Route path="*" element={<Navigate to="/dashboard" replace />} />
             </Route>
           </Routes>

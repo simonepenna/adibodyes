@@ -14,6 +14,7 @@ const Sidebar = ({ isOpen, setIsOpen }: SidebarProps) => {
     { name: 'Evasione', href: '/evasione', icon: '🚚' },
     { name: 'Rifiuti', href: '/rifiuti', icon: '♻️' },
     { name: 'GLS Parcel Shop', href: '/gls-parcel-shop', icon: '🏪' },
+    { name: 'Rimborsi', href: '/rimborsi', icon: '💰' },
   ];
 
   return (
