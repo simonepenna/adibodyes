@@ -48,6 +48,12 @@ const Evasione = () => {
   ].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
 
   const getStatusBadge = (order: FulfillmentOrder) => {
+    // Prima controlla se ci sono problemi di indirizzo
+    if (hasAddressIssue(order)) {
+      return <span className="badge badge-sm badge-warning">WARNING</span>;
+    }
+
+    // Altrimenti usa la categoria del backend
     if (order.category === 'GREEN') {
       return <span className="badge badge-sm badge-success">OK</span>;
     } else if (order.category === 'YELLOW') {
@@ -73,6 +79,37 @@ const Evasione = () => {
       .filter(item => item.sku) // Escludi item senza SKU (es. Pago Contra Reembolso)
       .map(item => `${item.quantity}x ${item.sku}`)
       .join(', ');
+  };
+
+  function hasAddressIssue(order: FulfillmentOrder) {
+    const a = order.shipping_address;
+    if (!a) return true;
+
+    // Controlla sia address1 che address2 per il numero civico
+    const address1 = a.address1 || '';
+    const address2 = a.address2 || '';
+    const fullAddress = (address1 + ' ' + address2).toLowerCase().trim();
+
+    // Se non c'è nessun indirizzo, è un problema
+    if (!fullAddress) return true;
+
+    // Se contiene "s/n" (sin número), è considerato valido
+    if (fullAddress.includes('s/n') || fullAddress.includes('sin número')) {
+      return false;
+    }
+
+    // Controlla se c'è almeno un numero nell'indirizzo completo
+    const hasStreetNumber = /\d/.test(fullAddress);
+
+    return !hasStreetNumber;
+  }
+
+  // Ricalcola i totali considerando anche i problemi di indirizzo
+  const adjustedSummary = {
+    total: data.summary.total,
+    green: data.orders.green.filter(order => !hasAddressIssue(order)).length,
+    yellow: data.summary.yellow + data.orders.green.filter(order => hasAddressIssue(order)).length,
+    red: data.summary.red
   };
 
   return (
@@ -104,7 +141,7 @@ const Evasione = () => {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-base-content/70 text-base font-bold">Totale Ordini</p>
-                <p className="text-3xl font-bold text-primary">{data.summary.total}</p>
+                <p className="text-3xl font-bold text-primary">{adjustedSummary.total}</p>
               </div>
               <div className="text-4xl">📋</div>
             </div>
@@ -116,7 +153,7 @@ const Evasione = () => {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-base-content/70 text-base font-bold">Evadibili OK</p>
-                <p className="text-3xl font-bold text-success">{data.summary.green}</p>
+                <p className="text-3xl font-bold text-success">{adjustedSummary.green}</p>
               </div>
               <div className="text-4xl">✅</div>
             </div>
@@ -128,7 +165,7 @@ const Evasione = () => {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-base-content/70 text-base font-bold">Con Warning</p>
-                <p className="text-3xl font-bold text-warning">{data.summary.yellow}</p>
+                <p className="text-3xl font-bold text-warning">{adjustedSummary.yellow}</p>
               </div>
               <div className="text-4xl">⚠️</div>
             </div>
@@ -140,7 +177,7 @@ const Evasione = () => {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-base-content/70 text-base font-bold">No Stock</p>
-                <p className="text-3xl font-bold text-error">{data.summary.red}</p>
+                <p className="text-3xl font-bold text-error">{adjustedSummary.red}</p>
               </div>
               <div className="text-4xl">❌</div>
             </div>
@@ -184,7 +221,13 @@ const Evasione = () => {
                     <td className="text-sm max-w-xs truncate">{formatItems(order)}</td>
                     <td>{getStatusBadge(order)}</td>
                     <td className="text-sm">
-                      {order.warnings.length > 0 ? order.warnings.join('; ') : '-'}
+                      {(() => {
+                        const warnings = [...order.warnings];
+                        if (hasAddressIssue(order)) {
+                          warnings.push('Indirizzo incompleto o problematico');
+                        }
+                        return warnings.length > 0 ? warnings.join('; ') : '-';
+                      })()}
                     </td>
                     <td>
                       {order.shipping_address?.phone ? (() => {
@@ -197,16 +240,30 @@ const Evasione = () => {
                         const sizesText = sizes.length > 0 
                           ? sizes.map(size => `una ${size}`).join(', ').replace(/, ([^,]*)$/, ' y $1')
                           : 'ninguna talla disponible';
+                        
+                        // Determina il messaggio in base al tipo di warning
+                        let message = '';
+                        if (hasAddressIssue(order)) {
+                          // Messaggio per indirizzo incompleto
+                          message = `Buenos días, ${firstName}.\n` +
+                                   `Somos el equipo de AdiBody.\n\n` +
+                                   `Antes de enviar tu pedido, queremos confirmar la dirección completa, ya que nos aparece incompleta.\n` +
+                                   `¿Podrías indicarnos calle, número, código postal y ciudad?\n\n` +
+                                   `¡Gracias!\n` +
+                                   `AdiBody`;
+                        } else {
+                          // Messaggio per taglie (warning originale)
+                          message = `Buenos días, ${firstName}.\n` +
+                                   `Somos el equipo de AdiBody.\n` +
+                                   `¿Podrías confirmarnos, por favor, las tallas del pedido?\n` +
+                                   `Vemos ${sizesText}.\n\n` +
+                                   `¡Gracias!\n` +
+                                   `AdiBody`;
+                        }
+                        
                         return (
                           <a
-                            href={`https://web.whatsapp.com/send?phone=${encodeURIComponent(phone)}&text=${encodeURIComponent(
-                              `Buenos días, ${firstName}.\n` +
-                              `Somos el equipo de AdiBody.\n` +
-                              `¿Podrías confirmarnos, por favor, las tallas del pedido?\n` +
-                              `Vemos ${sizesText}.\n\n` +
-                              `¡Gracias!\n` +
-                              `AdiBody`
-                            )}`}
+                            href={`https://web.whatsapp.com/send?phone=${encodeURIComponent(phone)}&text=${encodeURIComponent(message)}`}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="btn btn-success btn-sm btn-circle"
