@@ -121,7 +121,7 @@ const Rimborsi = () => {
                         </span>
                       </td>
                       <td className="text-sm max-w-xs">
-                        <div className="truncate" title={order.note || 'Nessuna nota'}>
+                        <div className="whitespace-pre-line" title={order.note || 'Nessuna nota'}>
                           {order.note || 'Nessuna nota'}
                         </div>
                       </td>
