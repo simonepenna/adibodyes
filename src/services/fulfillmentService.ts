@@ -29,6 +29,7 @@ export interface FulfillmentOrder {
   created_at: string;
   financial_status: string;
   customer_name: string;
+  email?: string; // Aggiunto campo email opzionale
   total_price: string;
   note: string;
   tags: string[];
@@ -74,3 +75,78 @@ export const fetchFulfillmentData = async (days: number = 4): Promise<Fulfillmen
     throw error;
   }
 };
+
+// Lambda fulfillment interfaces and functions
+const LAMBDA_BASE_URL = import.meta.env.VITE_LAMBDA_BASE_URL || '/api';
+
+export interface FulfillOrderRequest {
+  orderId: string;
+  orderName: string;
+  customerName: string;
+  shippingAddress: {
+    address1?: string;
+    address2?: string;
+    city?: string;
+    zip?: string;
+    country?: string;
+    phone?: string;
+  };
+  items: Array<{
+    sku: string;
+    quantity: number;
+    title?: string;
+  }>;
+  totalPrice: string;
+  financialStatus: string;
+  email: string;
+  customObservations?: string;
+  notifyCustomer?: boolean;
+}
+
+export interface FulfillOrderResponse {
+  success: boolean;
+  trackingNumber?: string;
+  message?: string;
+  error?: string;
+}
+
+/**
+ * Chiama la Lambda per evadere un ordine (GLS + Shopify)
+ * Endpoint: /orders/fulfill
+ */
+export async function fulfillOrderLambda(data: FulfillOrderRequest): Promise<FulfillOrderResponse> {
+  try {
+    console.log('🚀 Chiamata Lambda /orders/fulfill');
+    console.log('📦 Dati:', data);
+
+    const response = await fetch(`${LAMBDA_BASE_URL}/orders/fulfill`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(data)
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const result = await response.json();
+
+    console.log('✅ Risposta Lambda:', result);
+
+    return {
+      success: result.success || false,
+      trackingNumber: result.trackingNumber,
+      message: result.message,
+      error: result.error
+    };
+
+  } catch (error) {
+    console.error('❌ Errore chiamata Lambda:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Errore sconosciuto'
+    };
+  }
+}

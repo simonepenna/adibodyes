@@ -117,6 +117,7 @@ def get_unfulfilled_orders_shopify(days_back=7):
               firstName
               lastName
               phone
+              email
             }}
             shippingAddress {{
               address1
@@ -401,12 +402,16 @@ def lambda_handler(event, context):
             if not customer_name:
                 customer_name = "N/A"
             
+            # Estrai email cliente
+            customer_email = customer.get('email', '')
+            
             order_data = {
                 'id': order['id'],
                 'name': order['name'],
                 'created_at': order['created_at'],
                 'financial_status': order['financial_status'],
                 'customer_name': customer_name,
+                'email': customer_email,
                 'total_price': order['total_price'],
                 'note': order.get('note', ''),
                 'tags': order.get('tags', []),

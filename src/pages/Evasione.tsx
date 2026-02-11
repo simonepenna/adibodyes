@@ -1,10 +1,19 @@
 import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { fetchFulfillmentData } from '../services/fulfillmentService';
+import { fetchFulfillmentData, fulfillOrderLambda } from '../services/fulfillmentService';
 import type { FulfillmentOrder } from '../services/fulfillmentService';
 
 const Evasione = () => {
   const [days, setDays] = useState(4);
+  const [selectedOrderForFulfillment, setSelectedOrderForFulfillment] = useState<FulfillmentOrder | null>(null);
+  const [customObservations, setCustomObservations] = useState('');
+  const [notifyCustomer, setNotifyCustomer] = useState(true);
+  
+  // Bulk fulfillment state
+  const [selectedOrders, setSelectedOrders] = useState<Set<string>>(new Set());
+  const [isBulkProcessing, setIsBulkProcessing] = useState(false);
+  const [bulkResults, setBulkResults] = useState<{orderId: string, orderName: string, success: boolean, error?: string, trackingNumber?: string}[]>([]);
+  const [showBulkResults, setShowBulkResults] = useState(false);
 
   // Aggiorna il titolo della pagina
   useEffect(() => {
@@ -104,6 +113,135 @@ const Evasione = () => {
     return !hasStreetNumber;
   }
 
+  const openFulfillmentModal = (order: FulfillmentOrder) => {
+    setSelectedOrderForFulfillment(order);
+    setCustomObservations(''); // Reset observations
+  };
+
+  const closeModal = () => {
+    setSelectedOrderForFulfillment(null);
+    setCustomObservations('');
+  };
+
+  const handleFulfillOrder = async () => {
+    if (!selectedOrderForFulfillment) return;
+
+    const order = selectedOrderForFulfillment;
+    closeModal(); // Chiudi il modal prima di processare
+    try {
+      // Determina quali observations usare
+      const finalObservations = customObservations.trim() ||
+        order.items.filter(item => item.sku).map(item => `${item.sku}x${item.quantity}`).join(', ');
+
+      // Prepara i dati per la Lambda (stesso formato che usa la Lambda)
+      const lambdaData = {
+        orderId: order.id,
+        orderName: order.name,
+        customerName: order.customer_name,
+        shippingAddress: order.shipping_address || {},
+        items: order.items.filter(item => item.sku), // Solo item con SKU
+        totalPrice: order.total_price,
+        financialStatus: order.financial_status,
+        email: order.email || '',
+        customObservations: finalObservations, // Observations custom o default
+        notifyCustomer: notifyCustomer
+      };
+
+      // Chiama la Lambda che gestisce sia GLS che Shopify
+      const result = await fulfillOrderLambda(lambdaData);
+
+      if (result.success) {
+        alert(`✅ Ordine ${order.name} evaso con successo!\n📦 Tracking GLS: ${result.trackingNumber}\n📧 ${notifyCustomer ? 'Cliente notificato' : 'Cliente NON notificato'}`);
+      } else {
+        alert(`❌ Errore nell'evasione dell'ordine: ${result.error}`);
+      }
+    } catch (error) {
+      console.error('Error fulfilling order:', error);
+      alert('Errore nell\'evasione dell\'ordine');
+    }
+  };
+
+  // Bulk selection handlers
+  const toggleOrderSelection = (orderId: string) => {
+    setSelectedOrders(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(orderId)) {
+        newSet.delete(orderId);
+      } else {
+        newSet.add(orderId);
+      }
+      return newSet;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    const fulfillableOrders = allOrders.filter(order => order.can_fulfill);
+    if (selectedOrders.size === fulfillableOrders.length) {
+      setSelectedOrders(new Set());
+    } else {
+      setSelectedOrders(new Set(fulfillableOrders.map(order => order.id)));
+    }
+  };
+
+  // Bulk fulfill handler
+  const handleBulkFulfill = async () => {
+    if (selectedOrders.size === 0) return;
+    
+    const confirmMsg = `Vuoi evadere ${selectedOrders.size} ordini selezionati?\n\n⚠️ Questa operazione creerà spedizioni GLS reali!`;
+    if (!confirm(confirmMsg)) return;
+
+    setIsBulkProcessing(true);
+    const results: {orderId: string, orderName: string, success: boolean, error?: string, trackingNumber?: string}[] = [];
+
+    // Processa ordini sequenzialmente per evitare sovraccarico
+    for (const orderId of selectedOrders) {
+      const order = allOrders.find(o => o.id === orderId);
+      if (!order || !order.can_fulfill) continue;
+
+      try {
+        const lambdaData = {
+          orderId: order.id,
+          orderName: order.name,
+          customerName: order.customer_name,
+          shippingAddress: order.shipping_address || {},
+          items: order.items.filter(item => item.sku),
+          totalPrice: order.total_price,
+          financialStatus: order.financial_status,
+          email: order.email || '',
+          customObservations: order.items.filter(item => item.sku).map(item => `${item.sku}x${item.quantity}`).join(', '),
+          notifyCustomer: false // Non notificare in bulk per default
+        };
+
+        const result = await fulfillOrderLambda(lambdaData);
+        
+        results.push({
+          orderId: order.id,
+          orderName: order.name,
+          success: result.success,
+          error: result.error,
+          trackingNumber: result.trackingNumber
+        });
+      } catch (error) {
+        results.push({
+          orderId: order.id,
+          orderName: order.name,
+          success: false,
+          error: error instanceof Error ? error.message : 'Errore sconosciuto'
+        });
+      }
+    }
+
+    setBulkResults(results);
+    setShowBulkResults(true);
+    setIsBulkProcessing(false);
+    setSelectedOrders(new Set()); // Clear selection
+  };
+
+  const closeBulkResultsModal = () => {
+    setShowBulkResults(false);
+    setBulkResults([]);
+  };
+
   // Ricalcola i totali considerando anche i problemi di indirizzo
   const adjustedSummary = {
     total: data.summary.total,
@@ -117,9 +255,9 @@ const Evasione = () => {
       <div className="mb-6">
         
         <div className="flex items-center gap-3 mb-6">
-          <label className="text-base font-medium">Mostra ordini degli ultimi:</label>
+          <label className="text-base font-medium whitespace-nowrap">Mostra ordini degli ultimi:</label>
           <select 
-            className="select select-bordered select-sm"
+            className="select select-bordered select-sm pl-3"
             value={days}
             onChange={(e) => setDays(Number(e.target.value))}
           >
@@ -135,7 +273,7 @@ const Evasione = () => {
       </div>
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-5 gap-6">
         <div className="card bg-base-100 shadow-sm hover:shadow-md transition-shadow">
           <div className="card-body">
             <div className="flex items-center justify-between">
@@ -183,16 +321,54 @@ const Evasione = () => {
             </div>
           </div>
         </div>
+
+        <div 
+          className={`card shadow-sm transition-shadow cursor-pointer ${
+            selectedOrders.size > 0 && !isBulkProcessing
+              ? 'bg-primary/10 hover:shadow-md hover:bg-primary/20' 
+              : 'bg-base-200 opacity-50 cursor-not-allowed'
+          }`}
+          onClick={() => {
+            if (selectedOrders.size > 0 && !isBulkProcessing) {
+              handleBulkFulfill();
+            }
+          }}
+        >
+          <div className="card-body">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-base-content/70 text-base font-bold">Evadi Selezionati</p>
+                <p className={`text-3xl font-bold ${selectedOrders.size > 0 ? 'text-primary' : 'text-base-content/50'}`}>
+                  {isBulkProcessing ? (
+                    <span className="loading loading-spinner loading-md"></span>
+                  ) : (
+                    selectedOrders.size || '-'
+                  )}
+                </p>
+              </div>
+              <div className="text-4xl">🚚</div>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Tabella Unica con tutti gli ordini */}
       <div className="card bg-base-100 shadow-sm hover:shadow-md transition-shadow">
         <div className="card-body">
-          <h2 className="card-title font-bold">Ordini da Evadere</h2>
+          <h2 className="card-title font-bold mb-4">Ordini da Evadere</h2>
           <div className="overflow-x-auto">
             <table className="table table-zebra">
               <thead>
                 <tr>
+                  <th className="text-base w-12">
+                    <input
+                      type="checkbox"
+                      className="checkbox bg-white border-2 border-base-300"
+                      checked={allOrders.filter(o => o.can_fulfill).length > 0 && selectedOrders.size === allOrders.filter(o => o.can_fulfill).length}
+                      onChange={toggleSelectAll}
+                      disabled={allOrders.filter(o => o.can_fulfill).length === 0}
+                    />
+                  </th>
                   <th className="text-base">Ordine</th>
                   <th className="text-base">Data</th>
                   <th className="text-base">Cliente</th>
@@ -202,12 +378,22 @@ const Evasione = () => {
                   <th className="text-base">Taglie Ordine</th>
                   <th className="text-base">Evadibile</th>
                   <th className="text-base">Dettagli</th>
+                  <th className="text-base">Evadi</th>
                   <th className="text-base">WhatsApp</th>
                 </tr>
               </thead>
               <tbody>
                 {allOrders.map((order) => (
                   <tr key={order.id} className="hover">
+                    <td>
+                      <input
+                        type="checkbox"
+                        className="checkbox bg-white border-2 border-base-300"
+                        checked={selectedOrders.has(order.id)}
+                        onChange={() => toggleOrderSelection(order.id)}
+                        disabled={!order.can_fulfill}
+                      />
+                    </td>
                     <td className="font-mono font-medium">{order.name}</td>
                     <td className="text-sm">{new Date(order.created_at).toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit' })}</td>
                     <td className="font-medium">{order.customer_name}</td>
@@ -228,6 +414,16 @@ const Evasione = () => {
                         }
                         return warnings.length > 0 ? warnings.join('; ') : '-';
                       })()}
+                    </td>
+                    <td>
+                      <button
+                        className={`btn btn-sm btn-circle ${order.can_fulfill ? 'btn-primary' : 'btn-disabled'}`}
+                        title={order.can_fulfill ? 'Evadi ordine' : 'Ordine non evadibile'}
+                        onClick={() => order.can_fulfill && openFulfillmentModal(order)}
+                        disabled={!order.can_fulfill}
+                      >
+                        🚚
+                      </button>
                     </td>
                     <td>
                       {order.shipping_address?.phone ? (() => {
@@ -285,6 +481,174 @@ const Evasione = () => {
           </div>
         </div>
       </div>
+
+      {/* Modal Risultati Bulk Fulfillment */}
+      {showBulkResults && (
+        <div className="modal modal-open">
+          <div className="modal-box max-w-4xl">
+            <h3 className="font-bold text-2xl mb-4">Risultati Evasione in Massa</h3>
+            
+            <div className="stats stats-horizontal shadow mb-6 w-full">
+              <div className="stat">
+                <div className="stat-title">Totale</div>
+                <div className="stat-value text-primary">{bulkResults.length}</div>
+              </div>
+              <div className="stat">
+                <div className="stat-title">Successi</div>
+                <div className="stat-value text-success">{bulkResults.filter(r => r.success).length}</div>
+              </div>
+              <div className="stat">
+                <div className="stat-title">Errori</div>
+                <div className="stat-value text-error">{bulkResults.filter(r => !r.success).length}</div>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto max-h-96">
+              <table className="table table-zebra table-sm">
+                <thead>
+                  <tr>
+                    <th>Ordine</th>
+                    <th>Stato</th>
+                    <th>Dettagli</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {bulkResults.map((result) => (
+                    <tr key={result.orderId}>
+                      <td className="font-mono font-medium">{result.orderName}</td>
+                      <td>
+                        {result.success ? (
+                          <span className="badge badge-success">✓ Successo</span>
+                        ) : (
+                          <span className="badge badge-error">✗ Errore</span>
+                        )}
+                      </td>
+                      <td className="text-sm">
+                        {result.success ? (
+                          <span>📦 Tracking: {result.trackingNumber}</span>
+                        ) : (
+                          <span className="text-error">{result.error}</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="modal-action">
+              <button className="btn btn-primary" onClick={closeBulkResultsModal}>
+                Chiudi
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Conferma Evasione */}
+      {selectedOrderForFulfillment && (
+        <div className="modal modal-open">
+          <div className="modal-box max-w-3xl">
+            {/* Header */}
+            <div className="flex items-center justify-between mb-6 pb-4 border-b">
+              <div>
+                <h3 className="font-bold text-2xl">{selectedOrderForFulfillment.name}</h3>
+                <p className="text-sm text-base-content/60 mt-1">{selectedOrderForFulfillment.customer_name}</p>
+              </div>
+              <div className="text-right">
+                <p className="text-2xl font-bold text-primary">€{selectedOrderForFulfillment.total_price}</p>
+                <span className="badge badge-sm">{selectedOrderForFulfillment.financial_status}</span>
+              </div>
+            </div>
+            
+            {/* Shipping Address */}
+            <div className="mb-6">
+              <label className="text-xs font-semibold text-base-content/60 uppercase tracking-wide mb-2 block">
+                Indirizzo di Spedizione
+              </label>
+              <div className="bg-base-200/50 p-4 rounded-xl border border-base-300">
+                <p className="font-medium">
+                  {selectedOrderForFulfillment.shipping_address?.address1}
+                  {selectedOrderForFulfillment.shipping_address?.address2 && `, ${selectedOrderForFulfillment.shipping_address.address2}`}
+                </p>
+                <p className="text-sm text-base-content/70 mt-1">
+                  {selectedOrderForFulfillment.shipping_address?.city} {selectedOrderForFulfillment.shipping_address?.zip}
+                </p>
+                <p className="text-sm text-base-content/70">
+                  {selectedOrderForFulfillment.shipping_address?.country}
+                </p>
+              </div>
+            </div>
+
+            {/* Service Details Grid */}
+            <div className="mb-6">
+              <label className="text-xs font-semibold text-base-content/60 uppercase tracking-wide mb-2 block">
+                Dettagli Spedizione
+              </label>
+              <div className="grid grid-cols-3 gap-3">
+                <div className="bg-base-200/50 p-3 rounded-lg border border-base-300">
+                  <p className="text-xs text-base-content/60 mb-1">Servizio</p>
+                  <p className="font-semibold">BusinessParcel</p>
+                </div>
+                <div className="bg-base-200/50 p-3 rounded-lg border border-base-300">
+                  <p className="text-xs text-base-content/60 mb-1">Colli</p>
+                  <p className="font-semibold">1</p>
+                </div>
+                <div className="bg-base-200/50 p-3 rounded-lg border border-base-300">
+                  <p className="text-xs text-base-content/60 mb-1">Peso</p>
+                  <p className="font-semibold">1 kg</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Observations */}
+            <div className="mb-6">
+              <label className="text-xs font-semibold text-base-content/60 uppercase tracking-wide mb-2 block">
+                Note Spedizione
+              </label>
+              <textarea
+                className="textarea textarea-bordered w-full h-24 focus:textarea-primary"
+                placeholder={selectedOrderForFulfillment.items.filter(item => item.sku).map(item => `${item.sku}x${item.quantity}`).join(', ')}
+                value={customObservations}
+                onChange={(e) => setCustomObservations(e.target.value)}
+              />
+            </div>
+
+            {/* Notify Customer Checkbox */}
+            <div className="mb-6">
+              <label className="flex items-center gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="checkbox bg-white border-2 border-base-300"
+                  style={{
+                    '--chkbg': 'oklch(var(--p))',
+                    '--chkfg': 'white'
+                  } as React.CSSProperties}
+                  checked={notifyCustomer}
+                  onChange={(e) => setNotifyCustomer(e.target.checked)}
+                />
+                <span className="font-medium">Invia notifica al cliente</span>
+              </label>
+            </div>
+
+            {/* Actions */}
+            <div className="flex gap-3 mt-8">
+              <button 
+                className="btn btn-error text-error-content flex-1" 
+                onClick={closeModal}
+              >
+                Annulla
+              </button>
+              <button 
+                className="btn btn-success text-success-content flex-1" 
+                onClick={handleFulfillOrder}
+              >
+                Conferma
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

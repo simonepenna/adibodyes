@@ -1,5 +1,5 @@
-# Base image ufficiale AWS Lambda Python 3.10 (più stabile per pandas)
-FROM public.ecr.aws/lambda/python:3.10
+# Base image ufficiale AWS Lambda Python 3.12
+FROM public.ecr.aws/lambda/python:3.12
 
 # Imposta la directory di lavoro
 WORKDIR ${LAMBDA_TASK_ROOT}
@@ -7,12 +7,12 @@ WORKDIR ${LAMBDA_TASK_ROOT}
 # Copia i file necessari
 COPY web/utility/lambda_parcel_shop.py ${LAMBDA_TASK_ROOT}/
 
-# Installa le dipendenze con versioni compatibili
+# Installa le dipendenze con versioni compatibili con Python 3.12
 RUN pip install --upgrade pip --trusted-host pypi.org --trusted-host files.pythonhosted.org && \
     pip install \
     requests==2.31.0 \
-    pandas==1.5.3 \
-    numpy==1.21.6 \
+    pandas==2.2.0 \
+    numpy==1.26.0 \
     beautifulsoup4==4.12.2 \
     lxml==4.9.3 \
     --trusted-host pypi.org --trusted-host files.pythonhosted.org
