@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Environment variables
+.env
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -28,3 +31,4 @@ shopify-lambda-integration-ff8f0760340f.json
 *.key
 *.pem
 .env.local
+.env

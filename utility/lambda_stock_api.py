@@ -341,11 +341,31 @@ def parse_sku(sku):
     return sku, ""
 
 
+def is_valid_sku(sku):
+    """Verifica se uno SKU ha il formato valido (almeno 3 parti separate da punto)"""
+    if not sku or not isinstance(sku, str):
+        return False
+    parts = sku.split('.')
+    return len(parts) >= 3 and all(part.strip() for part in parts)
+
+
 def build_stock_data(weighted_avg, arrivo_fornitore, magazzino_attuale, backorders):
     """Costruisce dati completi stock + ordine fornitore"""
     
-    # Tutti gli SKU
-    all_skus = set(arrivo_fornitore.keys()) | set(magazzino_attuale.keys())
+    # Tutti gli SKU validi (filtra quelli con formato non valido)
+    all_skus = set()
+    for sku in set(arrivo_fornitore.keys()) | set(magazzino_attuale.keys()):
+        if is_valid_sku(sku):
+            all_skus.add(sku)
+    
+    # Filtra anche i dati di input per rimuovere SKU non validi
+    arrivo_fornitore = {sku: qty for sku, qty in arrivo_fornitore.items() if is_valid_sku(sku)}
+    magazzino_attuale = {sku: qty for sku, qty in magazzino_attuale.items() if is_valid_sku(sku)}
+    backorders = {sku: qty for sku, qty in backorders.items() if is_valid_sku(sku)}
+    
+    # Filtra weighted_avg per SKU validi
+    if not weighted_avg.empty:
+        weighted_avg = weighted_avg[weighted_avg["sku"].apply(is_valid_sku)].copy()
     
     # DataFrame base
     df = weighted_avg.copy()
@@ -567,8 +587,14 @@ def lambda_handler(event, context):
                         "current_quantity": item['quantity']
                     })
         
+        # Filtra SKU non validi dai dati di vendita
+        sku_data = [item for item in sku_data if is_valid_sku(item.get('sku'))]
+        
         weighted_avg = calculate_weighted_average(sku_data, days=GIORNI_ANALISI_VENDITE)
         backorders = fetch_backorders()
+        
+        # Filtra backorders per SKU validi
+        backorders = {sku: qty for sku, qty in backorders.items() if is_valid_sku(sku)}
         
         # 3. Calcola tutto
         df = build_stock_data(weighted_avg, arrivo_fornitore, magazzino_attuale, backorders)
