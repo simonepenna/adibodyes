@@ -1,0 +1,19 @@
+# Base image ufficiale AWS Lambda Python 3.12 (più stabile per numpy/pandas)
+FROM public.ecr.aws/lambda/python:3.12
+
+# Imposta la directory di lavoro
+WORKDIR /var/task
+
+# Copia i file necessari
+COPY web/utility/lambda_almacenado.py ${LAMBDA_TASK_ROOT}/
+COPY GLS/extract_shipments_normal.py ${LAMBDA_TASK_ROOT}/
+COPY GLS/gls_cookies.json ${LAMBDA_TASK_ROOT}/
+COPY GLS/ ${LAMBDA_TASK_ROOT}/GLS/
+COPY shopify/shopify-lambda-integration-ff8f0760340f.json ${LAMBDA_TASK_ROOT}/
+
+# Installa le dipendenze direttamente
+RUN pip install --upgrade pip --trusted-host pypi.org --trusted-host files.pythonhosted.org && \
+    pip install pandas numpy requests beautifulsoup4 html5lib --trusted-host pypi.org --trusted-host files.pythonhosted.org -t ${LAMBDA_TASK_ROOT}
+
+# Comando di default per Lambda
+CMD ["lambda_almacenado.lambda_handler"]
