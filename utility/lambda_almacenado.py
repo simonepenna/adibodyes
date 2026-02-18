@@ -358,6 +358,9 @@ class GLSExtranetClient:
                 'nombre_org': get_cell_text('nombre_org'),
                 'localidad_org': get_cell_text('localidad_org'),
                 'fecha_actualizacion': get_cell_text('fechaActualizacion'),
+                'indirizzo_agenzia': None,   # Placeholder - riempito dopo
+                'telefono_agenzia': None,    # Placeholder - riempito dopo
+                'orari_agenzia': None,       # Placeholder - riempito dopo
             })
 
         logger.info(f"✅ Trovate {len(shipments)} spedizioni ALMACENADO senza 'NO ACEPTA' nel POD")
@@ -416,6 +419,98 @@ class GLSExtranetClient:
         except Exception as e:
             logger.warning(f"⚠️ Errore recupero telefono per ordine {order_number}: {e}")
             return None
+
+    def get_codplaza_org_from_soap(self, expedicion, uid_cliente):
+        """
+        Chiama il WS SOAP GLS (GetExpCli) per ottenere il codplaza_org reale
+        dell'agenzia di origine associata alla spedizione.
+
+        Args:
+            expedicion: Numero expedicion (es: "1250846273")
+            uid_cliente: UID cliente GLS
+
+        Returns:
+            str: codplaza_org oppure None se non trovato
+        """
+        import xml.etree.ElementTree as ET
+        url = "https://ws-customer.gls-spain.es/b2b.asmx?wsdl"
+        soap_xml = f'''<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <GetExpCli xmlns="http://www.asmred.com/">
+      <codigo>{expedicion}</codigo>
+      <uid>{uid_cliente}</uid>
+    </GetExpCli>
+  </soap12:Body>
+</soap12:Envelope>'''
+        headers = {
+            'Content-Type': 'text/xml; charset=UTF-8',
+            'SOAPAction': 'http://www.asmred.com/GetExpCli'
+        }
+        try:
+            resp = requests.post(url, data=soap_xml, headers=headers, verify=False, timeout=15)
+            if resp.status_code != 200:
+                logger.warning(f"⚠️ SOAP HTTP {resp.status_code} per expedicion {expedicion}")
+                return None
+            root = ET.fromstring(resp.text)
+            ns = {'asm': 'http://www.asmred.com/'}
+            elem = root.find('.//codplaza_org')
+            if elem is not None and elem.text:
+                codplaza = elem.text.strip()
+                logger.info(f"✅ codplaza_org SOAP per {expedicion}: {codplaza}")
+                return codplaza
+            logger.warning(f"⚠️ codplaza_org non trovato nel SOAP per {expedicion}")
+            return None
+        except Exception as e:
+            logger.warning(f"⚠️ Errore SOAP codplaza_org per {expedicion}: {e}")
+            return None
+
+    def get_agenzia_destino_details(self, codplaza_org, codexp):
+        """
+        Ottiene indirizzo, telefono e orari dell'agenzia di destinazione dall'extranet GLS.
+        Usa la sessione già autenticata.
+
+        Args:
+            codplaza_org: Codice plaza origine della spedizione (ottenuto via SOAP)
+            codexp: Numero expedicion della spedizione
+
+        Returns:
+            dict con chiavi 'indirizzo_agenzia', 'telefono_agenzia', 'orari_agenzia' oppure {}
+        """
+        try:
+            url = f"{self.base_url}/Extranet/MiraEnvios/expedicion.aspx?codplaza_org={codplaza_org}&codexp={codexp}"
+            response = self.session.get(url, verify=False, timeout=15)
+
+            if response.status_code != 200:
+                logger.warning(f"⚠️ Extranet agenzia HTTP {response.status_code} per expedicion {codexp}")
+                return {}
+
+            html = response.text
+            info = {}
+
+            import re as _re
+            indirizzo_m = _re.search(r'<input name="plzDstDireccion"[^>]*value="([^"]*)"', html)
+            if indirizzo_m:
+                info['indirizzo_agenzia'] = indirizzo_m.group(1).strip()
+
+            telefono_m = _re.search(r'<input name="plzDstTelefono"[^>]*value="([^"]*)"', html)
+            if telefono_m:
+                info['telefono_agenzia'] = telefono_m.group(1).strip()
+
+            orari_m = _re.search(r'<input name="plzDstHorario"[^>]*value="([^"]*)"', html)
+            if orari_m:
+                info['orari_agenzia'] = orari_m.group(1).strip()
+
+            if info:
+                logger.info(f"✅ Dettagli agenzia destino per {codexp}: {info}")
+            else:
+                logger.warning(f"⚠️ Nessun dettaglio agenzia trovato per expedicion {codexp}")
+
+            return info
+
+        except Exception as e:
+            logger.warning(f"⚠️ Errore recupero dettagli agenzia per {codexp}: {e}")
+            return {}
 
     def get_phones_from_shopify_batch(self, order_numbers):
         """
@@ -561,6 +656,23 @@ def lambda_handler(event, context):
         phones_map = client.get_phones_from_shopify_batch(order_numbers)
         df['phone'] = df['referencia'].map(phones_map)
         logger.info(f"⏱️ Batch telefoni Shopify: {time.time() - t_start:.2f}s")
+
+        # 🏢 Recupero dettagli agenzia di destinazione (indirizzo, telefono, orari)
+        # codplaza_org viene letto dinamicamente dal WS SOAP per ogni spedizione
+        gls_uid = os.environ.get("GLS_UID_CLIENTE", "cbfbcd8f-ef6c-4986-9643-0b964e1efa20")
+        t_start = time.time()
+        for idx, row in df.iterrows():
+            expedicion = str(row.get('expedicion', '')).strip()
+            if expedicion:
+                codplaza_org = client.get_codplaza_org_from_soap(expedicion, gls_uid)
+                if codplaza_org:
+                    dettagli = client.get_agenzia_destino_details(codplaza_org, expedicion)
+                    df.at[idx, 'indirizzo_agenzia'] = dettagli.get('indirizzo_agenzia')
+                    df.at[idx, 'telefono_agenzia'] = dettagli.get('telefono_agenzia')
+                    df.at[idx, 'orari_agenzia'] = dettagli.get('orari_agenzia')
+                else:
+                    logger.warning(f"⚠️ codplaza_org non disponibile per {expedicion}, dettagli agenzia saltati")
+        logger.info(f"⏱️ Dettagli agenzie (SOAP + extranet): {time.time() - t_start:.2f}s")
 
         logger.info(f"✅ Trovate {len(df)} spedizioni totali")
 

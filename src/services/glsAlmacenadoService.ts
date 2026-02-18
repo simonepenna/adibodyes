@@ -19,6 +19,9 @@ export interface GLSAlmacenadoItem {
   localidad_org: string;
   fecha_actualizacion: string;
   cp_dst: string;
+  indirizzo_agenzia: string | null;
+  telefono_agenzia: string | null;
+  orari_agenzia: string | null;
 }
 
 interface GLSAlmacenadoMetadata {
