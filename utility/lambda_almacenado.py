@@ -324,8 +324,8 @@ class GLSExtranetClient:
             
             # Controlla POD (colonna pod_idx)
             pod = cells[pod_idx].get_text(strip=True).upper()
-            if 'NO ACEPTA EXPEDICION' in pod:
-                continue  # Skip se contiene "NO ACEPTA EXPEDICION"
+            if 'NO ACEPTA' in pod:
+                continue  # Skip se contiene "NO ACEPTA" (qualsiasi variante)
             
             # MICRO-OTTIMIZZAZIONE: Estrai solo le colonne necessarie direttamente
             def get_cell_text(col_name):
@@ -360,7 +360,7 @@ class GLSExtranetClient:
                 'fecha_actualizacion': get_cell_text('fechaActualizacion'),
             })
 
-        logger.info(f"✅ Trovate {len(shipments)} spedizioni ALMACENADO senza 'NO ACEPTA EXPEDICION'")
+        logger.info(f"✅ Trovate {len(shipments)} spedizioni ALMACENADO senza 'NO ACEPTA' nel POD")
         return pd.DataFrame(shipments)
 
     def get_phone_from_shopify(self, order_number):
@@ -567,13 +567,31 @@ def lambda_handler(event, context):
         # Converti DataFrame a lista di dict per JSON
         shipments_list = df.to_dict('records')
 
+        # 🔥 FIX: Gestisci valori NaN/NaT che non sono validi in JSON
+        import numpy as np
+        def clean_for_json(obj):
+            """Converte valori NaN/NaT in None per JSON valido"""
+            if isinstance(obj, dict):
+                return {k: clean_for_json(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [clean_for_json(item) for item in obj]
+            elif isinstance(obj, float) and (np.isnan(obj) or np.isinf(obj)):
+                return None
+            elif hasattr(obj, 'isnull') and obj.isnull():  # Per pandas NaT
+                return None
+            else:
+                return obj
+
+        # Applica pulizia a tutti i dati
+        shipments_list = clean_for_json(shipments_list)
+
         # Restituisci direttamente i dati invece di salvare su S3
         result_data = {
             'metadata': {
                 'extraction_date': datetime.now().isoformat(),
                 'period': f"{date_from} - {date_to}",
                 'total_shipments': len(df),
-                'status_filter': 'ALMACENADO (senza NO ACEPTA EXPEDICION)'
+                'status_filter': 'ALMACENADO (senza NO ACEPTA nel POD)'
             },
             'shipments': shipments_list
         }

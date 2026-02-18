@@ -155,7 +155,8 @@ const GLSAlmacenado = () => {
                               `Puedes ir a recogerlo antes de que sea devuelto al remitente.\n\n` +
                               `📦 Número de pedido: #ES${shipment.referencia}\n\n` +
                               `🔗 Seguimiento:\n` +
-                              `https://mygls.gls-spain.es/e/${shipment.expedicion.replace('586-', '')}/${shipment.cp_dst}/es`
+                              `https://mygls.gls-spain.es/e/${shipment.expedicion.replace('586-', '')}/${shipment.cp_dst}/es\n\n` +
+                              `En el enlace puedes solicitar recoger tu paquete en la agencia, y encontrarás la dirección, el teléfono y los horarios de atención.`
                             )}`}
                             target="_blank"
                             rel="noopener noreferrer"
