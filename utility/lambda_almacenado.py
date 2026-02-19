@@ -4,6 +4,7 @@ che non hanno "NO ACEPTA EXPEDICION" nel POD
 """
 import requests
 import time
+import boto3
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import re
@@ -14,6 +15,10 @@ import json
 import sys
 import os
 import logging
+import numpy as np
+import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from requests.adapters import HTTPAdapter
 
 # Configurazione logging per CloudWatch
 logger = logging.getLogger()
@@ -22,6 +27,31 @@ logger.setLevel(logging.INFO)
 # Configurazione Shopify da environment variables
 SHOPIFY_ACCESS_TOKEN = os.environ.get("SHOPIFY_ACCESS_TOKEN")
 SHOPIFY_GRAPHQL_URL = os.environ.get("SHOPIFY_GRAPHQL_URL")
+
+# S3 per tracciare i clienti già contattati
+CONTACTED_S3_BUCKET = os.environ.get("CONTACTED_S3_BUCKET", "adibody-almacenado-state-bucket")
+CONTACTED_S3_KEY = "almacenado/contacted.json"
+
+# Client S3 a livello di modulo (riusato tra invocazioni Lambda - warm start)
+_s3_client = None
+def get_s3_client():
+    global _s3_client
+    if _s3_client is None:
+        _s3_client = boto3.client('s3')
+    return _s3_client
+
+
+def load_contacted_from_s3() -> dict:
+    """Carica da S3 il dizionario {expedicion: data_contatto}. Ritorna {} se non esiste."""
+    try:
+        s3 = get_s3_client()
+        obj = s3.get_object(Bucket=CONTACTED_S3_BUCKET, Key=CONTACTED_S3_KEY)
+        data = json.loads(obj['Body'].read())
+        logger.info(f"📋 Caricati {len(data)} expediciones già contattati da S3")
+        return data
+    except Exception as e:
+        logger.info(f"📋 Nessuno storico contatti trovato su S3 ({e}), parto da zero")
+        return {}
 
 
 class GLSExtranetClient:
@@ -34,7 +64,6 @@ class GLSExtranetClient:
         """
         self.session = requests.Session()
         # Pool grande per supportare le chiamate parallele (25+ thread simultanei)
-        from requests.adapters import HTTPAdapter
         adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
         self.session.mount('https://', adapter)
         self.session.mount('http://', adapter)
@@ -257,7 +286,6 @@ class GLSExtranetClient:
             pandas DataFrame con info spedizioni
         """
         # OTTIMIZZAZIONE 1: Usa regex per trovare il commento (molto più veloce)
-        import re
         comment_match = re.search(r'<!--.*?<table[^>]*id=["\']gr["\'].*?</table>.*?-->', html_content, re.DOTALL)
         
         if not comment_match:
@@ -437,7 +465,6 @@ class GLSExtranetClient:
         Returns:
             str: codplaza_org oppure None se non trovato
         """
-        import xml.etree.ElementTree as ET
         url = "https://ws-customer.gls-spain.es/b2b.asmx?wsdl"
         soap_xml = f'''<?xml version="1.0" encoding="utf-8"?>
 <soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
@@ -458,7 +485,6 @@ class GLSExtranetClient:
                 logger.warning(f"⚠️ SOAP HTTP {resp.status_code} per expedicion {expedicion}")
                 return None
             root = ET.fromstring(resp.text)
-            ns = {'asm': 'http://www.asmred.com/'}
             elem = root.find('.//codplaza_org')
             if elem is not None and elem.text:
                 codplaza = elem.text.strip()
@@ -493,16 +519,15 @@ class GLSExtranetClient:
             html = response.text
             info = {}
 
-            import re as _re
-            indirizzo_m = _re.search(r'<input name="plzDstDireccion"[^>]*value="([^"]*)"', html)
+            indirizzo_m = re.search(r'<input name="plzDstDireccion"[^>]*value="([^"]*)"', html)
             if indirizzo_m:
                 info['indirizzo_agenzia'] = indirizzo_m.group(1).strip()
 
-            telefono_m = _re.search(r'<input name="plzDstTelefono"[^>]*value="([^"]*)"', html)
+            telefono_m = re.search(r'<input name="plzDstTelefono"[^>]*value="([^"]*)"', html)
             if telefono_m:
                 info['telefono_agenzia'] = telefono_m.group(1).strip()
 
-            orari_m = _re.search(r'<input name="plzDstHorario"[^>]*value="([^"]*)"', html)
+            orari_m = re.search(r'<input name="plzDstHorario"[^>]*value="([^"]*)"', html)
             if orari_m:
                 info['orari_agenzia'] = orari_m.group(1).strip()
 
@@ -611,10 +636,11 @@ def lambda_handler(event, context):
             body = json.loads(event['body'])
         else:
             body = event
-        
+
         # Parametro days_back dall'event (default 15 giorni)
         days_back = int(body.get('days_back', 15))
-        logger.info(f"📊 Parametro ricevuto: days_back={days_back}")
+        show_all = bool(body.get('show_all', False))  # Se True, restituisce tutti (contattati + non)
+        logger.info(f"📊 Parametri: days_back={days_back}, show_all={show_all}")
 
         if not username or not password:
             raise ValueError("GLS_USERNAME e GLS_PASSWORD sono obbligatori nelle environment variables")
@@ -626,10 +652,16 @@ def lambda_handler(event, context):
 
         logger.info(f"📅 Periodo: {date_from} - {date_to}")
 
-        # Login con credenziali
-        client = GLSExtranetClient()
-        if not client.login(username, password):
-            raise Exception("Login GLS fallito")
+        # 📋 Carica storico contatti da S3 (in parallelo con il login GLS sotto)
+        with ThreadPoolExecutor(max_workers=2) as _ex:
+            _future_contacted = _ex.submit(load_contacted_from_s3)
+
+            # Login con credenziali (eseguito in parallelo con il GET S3)
+            client = GLSExtranetClient()
+            if not client.login(username, password):
+                raise Exception("Login GLS fallito")
+
+        already_contacted = _future_contacted.result()
 
         # Cerca spedizioni
         html = client.search_shipments(date_from, date_to)
@@ -655,25 +687,23 @@ def lambda_handler(event, context):
                 })
             }
 
-        # 🔥 OTTIMIZZAZIONE: Batch recupero telefoni Shopify
-        t_start = time.time()
-        order_numbers = df['referencia'].dropna().astype(str).tolist()
-        phones_map = client.get_phones_from_shopify_batch(order_numbers)
-        df['phone'] = df['referencia'].map(phones_map)
-        logger.info(f"⏱️ Batch telefoni Shopify: {time.time() - t_start:.2f}s")
-
-        # 🏢 Recupero dettagli agenzia di destinazione (indirizzo, telefono, orari)
-        # OTTIMIZZAZIONE: codplaza_org è sempre uguale per tutte le spedizioni dello stesso cliente.
-        # Facciamo 1 sola SOAP call, poi tutte le extranet in parallelo senza limite di workers.
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        # 🔥 OTTIMIZZAZIONE: Batch Shopify + SOAP in parallelo
         gls_uid = os.environ.get("GLS_UID_CLIENTE", "cbfbcd8f-ef6c-4986-9643-0b964e1efa20")
-        t_start = time.time()
-
-        # 1 SOAP call per ottenere codplaza_org (vale per tutte le spedizioni)
+        order_numbers = df['referencia'].dropna().astype(str).tolist()
         first_exp = str(df.iloc[0].get('expedicion', '')).strip() if not df.empty else ''
-        codplaza_org_comune = client.get_codplaza_org_from_soap(first_exp, gls_uid) if first_exp else None
-        logger.info(f"🏢 codplaza_org comune: {codplaza_org_comune} (1 SOAP call per tutte le spedizioni)")
 
+        t_start = time.time()
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            future_phones = ex.submit(client.get_phones_from_shopify_batch, order_numbers)
+            future_codplaza = ex.submit(client.get_codplaza_org_from_soap, first_exp, gls_uid) if first_exp else None
+
+        phones_map = future_phones.result()
+        codplaza_org_comune = future_codplaza.result() if future_codplaza else None
+        df['phone'] = df['referencia'].map(phones_map)
+        logger.info(f"⏱️ Batch Shopify + SOAP in parallelo: {time.time() - t_start:.2f}s")
+        logger.info(f"🏢 codplaza_org comune: {codplaza_org_comune}")
+
+        # 🏢 Recupero dettagli agenzia in parallelo (tutte le extranet insieme)
         def fetch_agenzia(idx_expedicion):
             idx, expedicion = idx_expedicion
             expedicion = str(expedicion).strip()
@@ -681,24 +711,37 @@ def lambda_handler(event, context):
                 return idx, {}
             return idx, client.get_agenzia_destino_details(codplaza_org_comune, expedicion)
 
+        t_start = time.time()
         expediciones = [(idx, row.get('expedicion', '')) for idx, row in df.iterrows()]
-        with ThreadPoolExecutor(max_workers=len(expediciones) or 1) as executor:
+        with ThreadPoolExecutor(max_workers=min(len(expediciones), 30) or 1) as executor:
             futures = {executor.submit(fetch_agenzia, item): item for item in expediciones}
             for future in as_completed(futures):
                 idx, dettagli = future.result()
-                df.at[idx, 'indirizzo_agenzia'] = dettagli.get('indirizzo_agenzia')
-                df.at[idx, 'telefono_agenzia'] = dettagli.get('telefono_agenzia')
-                df.at[idx, 'orari_agenzia'] = dettagli.get('orari_agenzia')
+                df.loc[idx, ['indirizzo_agenzia', 'telefono_agenzia', 'orari_agenzia']] = [
+                    dettagli.get('indirizzo_agenzia'),
+                    dettagli.get('telefono_agenzia'),
+                    dettagli.get('orari_agenzia'),
+                ]
 
-        logger.info(f"⏱️ Dettagli agenzie (SOAP + extranet parallelo): {time.time() - t_start:.2f}s")
+        logger.info(f"⏱️ Dettagli agenzie extranet parallelo: {time.time() - t_start:.2f}s")
 
         logger.info(f"✅ Trovate {len(df)} spedizioni totali")
 
-        # Converti DataFrame a lista di dict per JSON
-        shipments_list = df.to_dict('records')
+        # 📋 Marca le spedizioni già contattate
+        total_before = len(df)
+        df['already_contacted'] = df['expedicion'].astype(str).map(
+            lambda x: already_contacted.get(x, {}).get('data') if isinstance(already_contacted.get(x), dict) else already_contacted.get(x, None)
+        )
+        new_df = df[df['already_contacted'].isna()]
+        skipped = total_before - len(new_df)
+        logger.info(f"📋 Contatti: {total_before} totali → {len(new_df)} da contattare ({skipped} già contattati)")
+
+        # show_all=True → ritorna tutto il df (con campo already_contacted popolato)
+        # show_all=False (default) → ritorna solo quelli non ancora contattati
+        output_df = df if show_all else new_df
+        shipments_list = output_df.to_dict('records')
 
         # 🔥 FIX: Gestisci valori NaN/NaT che non sono validi in JSON
-        import numpy as np
         def clean_for_json(obj):
             """Converte valori NaN/NaT in None per JSON valido"""
             if isinstance(obj, dict):
@@ -720,7 +763,10 @@ def lambda_handler(event, context):
             'metadata': {
                 'extraction_date': datetime.now().isoformat(),
                 'period': f"{date_from} - {date_to}",
-                'total_shipments': len(df),
+                'total_shipments': len(output_df),
+                'total_including_contacted': total_before,
+                'already_contacted_skipped': skipped,
+                'show_all': show_all,
                 'status_filter': 'ALMACENADO (senza NO ACEPTA nel POD)'
             },
             'shipments': shipments_list
@@ -735,7 +781,7 @@ def lambda_handler(event, context):
                 'Access-Control-Allow-Headers': 'Content-Type',
                 'Access-Control-Allow-Methods': 'GET,POST,OPTIONS'
             },
-            'body': json.dumps(result_data, indent=2, ensure_ascii=False)
+            'body': json.dumps(result_data, ensure_ascii=False)
         }
 
     except Exception as e:

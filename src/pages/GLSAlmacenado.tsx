@@ -1,10 +1,12 @@
 import { useState, useEffect } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { fetchGLSAlmacenadoData } from '../services/glsAlmacenadoService';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { fetchGLSAlmacenadoData, markContacted } from '../services/glsAlmacenadoService';
 import type { GLSAlmacenadoItem } from '../services/glsAlmacenadoService';
 
 const GLSAlmacenado = () => {
-  const [daysBack, setDaysBack] = useState(15);
+  const daysBack = 15;
+  const [showAll, setShowAll] = useState(false); // default: solo non contattati
+  const queryClient = useQueryClient();
 
   // Aggiorna il titolo della pagina
   useEffect(() => {
@@ -12,12 +14,15 @@ const GLSAlmacenado = () => {
   }, []);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ['gls-almacenado', daysBack],
-    queryFn: () => fetchGLSAlmacenadoData(daysBack),
+    queryKey: ['gls-almacenado', daysBack, showAll],
+    queryFn: () => fetchGLSAlmacenadoData(daysBack, showAll),
   });
 
-  const handleDaysChange = (newDays: number) => {
-    setDaysBack(newDays);
+  const handleWhatsAppClick = async (expedicion: string, referencia: string) => {
+    // Apre WhatsApp e segna come contattato su S3
+    await markContacted(expedicion, referencia);
+    // Invalida la query per aggiornare la lista (se show_all, riga diventa grigia; se non show_all, sparisce)
+    queryClient.invalidateQueries({ queryKey: ['gls-almacenado'] });
   };
 
   if (isLoading) {
@@ -39,30 +44,22 @@ const GLSAlmacenado = () => {
 
   return (
     <div className="space-y-6">
-      {/* Selettore Periodo */}
-      <div className="card bg-base-100 shadow-sm border border-base-300 hover:shadow-md transition-shadow">
+      {/* Filtro Contattati */}
+      <div className="card bg-base-100 shadow-sm border border-base-300">
         <div className="card-body p-4">
-          <h2 className="text-sm font-semibold text-base-content/70 mb-3">Periodo Selezionato</h2>
-
-          {/* Bottoni periodo */}
+          <h2 className="text-sm font-semibold text-base-content/70 mb-3">Visualizzazione</h2>
           <div className="flex flex-wrap gap-2">
             <button
-              className={`btn btn-sm ${daysBack === 7 ? 'btn-primary' : 'btn-ghost'}`}
-              onClick={() => handleDaysChange(7)}
+              className={`btn btn-sm ${!showAll ? 'btn-primary' : 'btn-ghost'}`}
+              onClick={() => setShowAll(false)}
             >
-              7 giorni
+              📬 Solo da contattare
             </button>
             <button
-              className={`btn btn-sm ${daysBack === 15 ? 'btn-primary' : 'btn-ghost'}`}
-              onClick={() => handleDaysChange(15)}
+              className={`btn btn-sm ${showAll ? 'btn-primary' : 'btn-ghost'}`}
+              onClick={() => setShowAll(true)}
             >
-              15 giorni
-            </button>
-            <button
-              className={`btn btn-sm ${daysBack === 30 ? 'btn-primary' : 'btn-ghost'}`}
-              onClick={() => handleDaysChange(30)}
-            >
-              30 giorni
+              📋 Tutti
             </button>
           </div>
         </div>
@@ -70,15 +67,41 @@ const GLSAlmacenado = () => {
 
       {/* Stats Cards */}
       {data && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <div className="card bg-base-100 shadow-sm hover:shadow-md transition-shadow">
             <div className="card-body">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-base-content/70 text-sm font-bold">Totale Spedizioni</p>
-                  <p className="text-2xl font-bold text-primary">{data.metadata.total_shipments}</p>
+                  <p className="text-base-content/70 text-sm font-bold">Totale ALMACENADO</p>
+                  <p className="text-2xl font-bold text-warning">{data.metadata.total_including_contacted ?? data.metadata.total_shipments}</p>
                 </div>
                 <div className="text-3xl">📦</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="card bg-base-100 shadow-sm hover:shadow-md transition-shadow">
+            <div className="card-body">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-base-content/70 text-sm font-bold">Già contattati</p>
+                  <p className="text-2xl font-bold text-success">{data.metadata.already_contacted_skipped ?? 0}</p>
+                </div>
+                <div className="text-3xl">✅</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="card bg-base-100 shadow-sm hover:shadow-md transition-shadow">
+            <div className="card-body">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-base-content/70 text-sm font-bold">Da contattare</p>
+                  <p className="text-2xl font-bold text-primary">
+                    {(data.metadata.total_including_contacted ?? data.metadata.total_shipments) - (data.metadata.already_contacted_skipped ?? 0)}
+                  </p>
+                </div>
+                <div className="text-3xl">📬</div>
               </div>
             </div>
           </div>
@@ -94,18 +117,6 @@ const GLSAlmacenado = () => {
               </div>
             </div>
           </div>
-
-          <div className="card bg-base-100 shadow-sm hover:shadow-md transition-shadow">
-            <div className="card-body">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-base-content/70 text-sm font-bold">Stato Filtro</p>
-                  <p className="text-lg font-bold text-accent">ALMACENADO</p>
-                </div>
-                <div className="text-3xl">🏪</div>
-              </div>
-            </div>
-          </div>
         </div>
       )}
 
@@ -113,7 +124,6 @@ const GLSAlmacenado = () => {
       {data && data.shipments.length > 0 && (
         <div className="card bg-base-100 shadow-sm">
           <div className="card-body">
-            <h2 className="card-title font-bold">Spedizioni Almacenado</h2>
             <div className="overflow-x-auto">
               <table className="table table-zebra">
                 <thead>
@@ -131,7 +141,7 @@ const GLSAlmacenado = () => {
                 </thead>
                 <tbody>
                   {data.shipments.map((shipment: GLSAlmacenadoItem, index: number) => (
-                    <tr key={shipment.expedicion || index}>
+                    <tr key={shipment.expedicion || index} className={shipment.already_contacted ? 'opacity-40' : ''}>
                       <td className="font-mono font-medium">
                         <a
                           href={`https://mygls.gls-spain.es/e/${shipment.expedicion.replace('586-', '')}/${shipment.cp_dst}/es`}
@@ -152,9 +162,15 @@ const GLSAlmacenado = () => {
                       <td>{shipment.fecha}</td>
                       <td className="text-sm">{shipment.pod}</td>
                       <td className="text-center">
-                        <span className="badge badge-warning badge-sm whitespace-nowrap">
-                          ALMACENADO
-                        </span>
+                        {shipment.already_contacted ? (
+                          <span className="badge badge-success badge-sm whitespace-nowrap" title={`Contattato il ${shipment.already_contacted}`}>
+                            ✅ Contattato
+                          </span>
+                        ) : (
+                          <span className="badge badge-warning badge-sm whitespace-nowrap">
+                            ALMACENADO
+                          </span>
+                        )}
                       </td>
                       <td className="text-center">
                         {shipment.phone ? (
@@ -173,8 +189,10 @@ const GLSAlmacenado = () => {
                             )}`}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="btn btn-success btn-sm btn-circle"
-                            title="Invia messaggio WhatsApp"
+                            className={`btn btn-sm btn-circle ${shipment.already_contacted ? 'btn-ghost' : 'btn-success'}`}
+                            title={shipment.already_contacted ? `Già contattato il ${shipment.already_contacted}` : 'Invia messaggio WhatsApp'}
+                            onClick={() => handleWhatsAppClick(shipment.expedicion, shipment.referencia)}
+                            onContextMenu={() => markContacted(shipment.expedicion, shipment.referencia).then(() => queryClient.invalidateQueries({ queryKey: ['gls-almacenado'] })).catch(() => {})}
                           >
                             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
                               <path d="M13.601 2.326A7.854 7.854 0 0 0 7.994 0C3.627 0 .068 3.558.064 7.926c0 1.399.366 2.76 1.057 3.965L0 16l4.204-1.102a7.933 7.933 0 0 0 3.79.965h.004c4.368 0 7.926-3.558 7.93-7.93A7.898 7.898 0 0 0 13.6 2.326zM7.994 14.521a6.573 6.573 0 0 1-3.356-.92l-.24-.144-2.494.654.666-2.433-.156-.251a6.56 6.56 0 0 1-1.007-3.505c0-3.626 2.957-6.584 6.591-6.584a6.56 6.56 0 0 1 4.66 1.931 6.557 6.557 0 0 1 1.928 4.66c-.004 3.639-2.961 6.592-6.592 6.592zm3.615-4.934c-.197-.099-1.17-.578-1.353-.646-.182-.065-.315-.099-.445.099-.133.197-.513.646-.627.775-.114.133-.232.148-.43.05-.197-.1-.836-.308-1.592-.985-.59-.525-.985-1.175-1.103-1.372-.114-.198-.011-.304.088-.403.087-.088.197-.232.296-.346.1-.114.133-.198.198-.33.065-.134.034-.248-.015-.347-.05-.099-.445-1.076-.612-1.47-.16-.389-.323-.335-.445-.34-.114-.007-.247-.007-.38-.007a.729.729 0 0 0-.529.247c-.182.198-.691.677-.691 1.654 0 .977.71 1.916.81 2.049.098.133 1.394 2.132 3.383 2.992.47.205.84.326 1.129.418.475.152.904.129 1.246.08.38-.058 1.171-.48 1.338-.943.164-.464.164-.86.114-.943-.049-.084-.182-.133-.38-.232z"/>
