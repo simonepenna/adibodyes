@@ -33,6 +33,11 @@ class GLSExtranetClient:
             cookies: Dict con i cookies dalla tua sessione browser (opzionale)
         """
         self.session = requests.Session()
+        # Pool grande per supportare le chiamate parallele (25+ thread simultanei)
+        from requests.adapters import HTTPAdapter
+        adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
+        self.session.mount('https://', adapter)
+        self.session.mount('http://', adapter)
         self.base_url = "https://extranet.gls-spain.es"
         self.login_url = f"{self.base_url}/extranet/login.aspx?ReturnUrl=~/default.aspx"
         self.search_url = f"{self.base_url}/Extranet/MiraEnvios/Miraenvios.aspx"
@@ -658,21 +663,34 @@ def lambda_handler(event, context):
         logger.info(f"⏱️ Batch telefoni Shopify: {time.time() - t_start:.2f}s")
 
         # 🏢 Recupero dettagli agenzia di destinazione (indirizzo, telefono, orari)
-        # codplaza_org viene letto dinamicamente dal WS SOAP per ogni spedizione
+        # OTTIMIZZAZIONE: codplaza_org è sempre uguale per tutte le spedizioni dello stesso cliente.
+        # Facciamo 1 sola SOAP call, poi tutte le extranet in parallelo senza limite di workers.
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         gls_uid = os.environ.get("GLS_UID_CLIENTE", "cbfbcd8f-ef6c-4986-9643-0b964e1efa20")
         t_start = time.time()
-        for idx, row in df.iterrows():
-            expedicion = str(row.get('expedicion', '')).strip()
-            if expedicion:
-                codplaza_org = client.get_codplaza_org_from_soap(expedicion, gls_uid)
-                if codplaza_org:
-                    dettagli = client.get_agenzia_destino_details(codplaza_org, expedicion)
-                    df.at[idx, 'indirizzo_agenzia'] = dettagli.get('indirizzo_agenzia')
-                    df.at[idx, 'telefono_agenzia'] = dettagli.get('telefono_agenzia')
-                    df.at[idx, 'orari_agenzia'] = dettagli.get('orari_agenzia')
-                else:
-                    logger.warning(f"⚠️ codplaza_org non disponibile per {expedicion}, dettagli agenzia saltati")
-        logger.info(f"⏱️ Dettagli agenzie (SOAP + extranet): {time.time() - t_start:.2f}s")
+
+        # 1 SOAP call per ottenere codplaza_org (vale per tutte le spedizioni)
+        first_exp = str(df.iloc[0].get('expedicion', '')).strip() if not df.empty else ''
+        codplaza_org_comune = client.get_codplaza_org_from_soap(first_exp, gls_uid) if first_exp else None
+        logger.info(f"🏢 codplaza_org comune: {codplaza_org_comune} (1 SOAP call per tutte le spedizioni)")
+
+        def fetch_agenzia(idx_expedicion):
+            idx, expedicion = idx_expedicion
+            expedicion = str(expedicion).strip()
+            if not expedicion or not codplaza_org_comune:
+                return idx, {}
+            return idx, client.get_agenzia_destino_details(codplaza_org_comune, expedicion)
+
+        expediciones = [(idx, row.get('expedicion', '')) for idx, row in df.iterrows()]
+        with ThreadPoolExecutor(max_workers=len(expediciones) or 1) as executor:
+            futures = {executor.submit(fetch_agenzia, item): item for item in expediciones}
+            for future in as_completed(futures):
+                idx, dettagli = future.result()
+                df.at[idx, 'indirizzo_agenzia'] = dettagli.get('indirizzo_agenzia')
+                df.at[idx, 'telefono_agenzia'] = dettagli.get('telefono_agenzia')
+                df.at[idx, 'orari_agenzia'] = dettagli.get('orari_agenzia')
+
+        logger.info(f"⏱️ Dettagli agenzie (SOAP + extranet parallelo): {time.time() - t_start:.2f}s")
 
         logger.info(f"✅ Trovate {len(df)} spedizioni totali")
 

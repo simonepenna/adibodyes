@@ -132,7 +132,17 @@ const GLSAlmacenado = () => {
                 <tbody>
                   {data.shipments.map((shipment: GLSAlmacenadoItem, index: number) => (
                     <tr key={shipment.expedicion || index}>
-                      <td className="font-mono font-medium">{shipment.expedicion}</td>
+                      <td className="font-mono font-medium">
+                        <a
+                          href={`https://mygls.gls-spain.es/e/${shipment.expedicion.replace('586-', '')}/${shipment.cp_dst}/es`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="link link-primary"
+                          title="Apri tracking GLS"
+                        >
+                          {shipment.expedicion}
+                        </a>
+                      </td>
                       <td className="font-mono text-sm">{shipment.referencia}</td>
                       <td className="font-medium">{shipment.destinatario}</td>
                       <td className="text-sm max-w-xs truncate" title={shipment.direccion}>
