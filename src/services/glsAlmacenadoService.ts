@@ -43,12 +43,12 @@ export interface GLSAlmacenadoResponse {
 const LAMBDA_URL = 'https://i5g7wtxgec.execute-api.eu-central-1.amazonaws.com/prod/almacenado';
 const MARK_CONTACTED_URL = 'https://i5g7wtxgec.execute-api.eu-central-1.amazonaws.com/prod/mark-contacted';
 
-export const fetchGLSAlmacenadoData = async (daysBack: number = 15, showAll: boolean = false) => {
+export const fetchGLSAlmacenadoData = async (daysBack: number = 15) => {
   try {
     const response = await fetch(LAMBDA_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ days_back: daysBack, show_all: showAll })
+      body: JSON.stringify({ days_back: daysBack, show_all: true })
     });
     if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
     const data: GLSAlmacenadoResponse = await response.json();
