@@ -342,11 +342,19 @@ def parse_sku(sku):
 
 
 def is_valid_sku(sku):
-    """Verifica se uno SKU ha il formato valido (almeno 3 parti separate da punto)"""
+    """Verifica se uno SKU ha il formato valido (almeno 3 parti separate da punto).
+    Esclude SKU con talla placeholder come 'XXX'."""
     if not sku or not isinstance(sku, str):
         return False
     parts = sku.split('.')
-    return len(parts) >= 3 and all(part.strip() for part in parts)
+    if not (len(parts) >= 3 and all(part.strip() for part in parts)):
+        return False
+    talla = parts[1].strip().upper()
+    # Escludi talle placeholder/invalide
+    INVALID_TALLAS = {"XXX", "XX", "TEST", "PLACEHOLDER", "NA", "N/A"}
+    if talla in INVALID_TALLAS:
+        return False
+    return True
 
 
 def build_stock_data(weighted_avg, arrivo_fornitore, magazzino_attuale, backorders):

@@ -77,7 +77,7 @@ export const fetchFulfillmentData = async (days: number = 4): Promise<Fulfillmen
 };
 
 // Lambda fulfillment interfaces and functions
-const LAMBDA_BASE_URL = import.meta.env.VITE_LAMBDA_BASE_URL || '/api';
+const LAMBDA_BASE_URL = 'https://i5g7wtxgec.execute-api.eu-central-1.amazonaws.com/prod';
 
 export interface FulfillOrderRequest {
   orderId: string;
