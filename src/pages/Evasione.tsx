@@ -115,7 +115,7 @@ const Evasione = () => {
 
   const openFulfillmentModal = (order: FulfillmentOrder) => {
     setSelectedOrderForFulfillment(order);
-    setCustomObservations(''); // Reset observations
+    setCustomObservations(''); // vuoto: usa il placeholder come default all'invio
   };
 
   const closeModal = () => {
@@ -127,11 +127,17 @@ const Evasione = () => {
     if (!selectedOrderForFulfillment) return;
 
     const order = selectedOrderForFulfillment;
+    // Cattura customObservations PRIMA di closeModal (che la azzera)
+    const snapshotObservations = customObservations.trim();
     closeModal(); // Chiudi il modal prima di processare
     try {
       // Determina quali observations usare
-      const finalObservations = customObservations.trim() ||
-        order.items.filter(item => item.sku).map(item => `${item.sku}x${item.quantity}`).join(', ');
+      const isCOD = order.financial_status?.toLowerCase() !== 'paid';
+      const defaultObsParts = order.items
+        .filter(item => item.sku)
+        .map(item => `${item.sku}x${item.quantity}`);
+      if (isCOD) defaultObsParts.push('x1'); // contrassegno, come fa l'app GLS Shopify
+      const finalObservations = snapshotObservations || defaultObsParts.join('-');
 
       // Prepara i dati per la Lambda (stesso formato che usa la Lambda)
       const lambdaData = {
@@ -604,11 +610,15 @@ const Evasione = () => {
             {/* Observations */}
             <div className="mb-6">
               <label className="text-xs font-semibold text-base-content/60 uppercase tracking-wide mb-2 block">
-                Note Spedizione
+                Observations
               </label>
               <textarea
                 className="textarea textarea-bordered w-full h-24 focus:textarea-primary"
-                placeholder={selectedOrderForFulfillment.items.filter(item => item.sku).map(item => `${item.sku}x${item.quantity}`).join(', ')}
+                placeholder={(() => {
+                  const parts = selectedOrderForFulfillment.items.filter(item => item.sku).map(item => `${item.sku}x${item.quantity}`);
+                  if (selectedOrderForFulfillment.financial_status?.toLowerCase() !== 'paid') parts.push('x1');
+                  return parts.join('-');
+                })()}
                 value={customObservations}
                 onChange={(e) => setCustomObservations(e.target.value)}
               />

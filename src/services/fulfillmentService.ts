@@ -128,7 +128,9 @@ export async function fulfillOrderLambda(data: FulfillOrderRequest): Promise<Ful
     });
 
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      const errorBody = await response.json().catch(() => ({}));
+      const errorMsg = errorBody.error || errorBody.message || response.statusText;
+      throw new Error(`HTTP ${response.status}: ${errorMsg}`);
     }
 
     const result = await response.json();

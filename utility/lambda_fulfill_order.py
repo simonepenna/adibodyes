@@ -36,7 +36,7 @@ SHOPIFY_HEADERS = {
 # ============================================================================
 # GLS SERVICE - CREAZIONE SPEDIZIONE
 # ============================================================================
-def create_gls_shipment(order_data: Dict[str, Any]) -> Dict[str, Any]:
+def create_gls_shipment(order_data: Dict[str, Any], _retry: bool = False) -> Dict[str, Any]:
     """
     Crea spedizione GLS tramite SOAP API.
     
@@ -55,26 +55,45 @@ def create_gls_shipment(order_data: Dict[str, Any]) -> Dict[str, Any]:
     try:
         # Determina reembolso basato su financial status
         is_paid = order_data.get('financialStatus', '').lower() == 'paid'
-        reembolso = '0' if is_paid else str(order_data.get('totalPrice', '0'))
+        # GLS usa la virgola come separatore decimale (es: 12,35)
+        # Arrotonda a 2 decimali per evitare floating point (es: 35.899999...)
+        try:
+            total_price_rounded = f"{float(order_data.get('totalPrice', '0')):.2f}"
+        except (ValueError, TypeError):
+            total_price_rounded = str(order_data.get('totalPrice', '0'))
+        total_price_raw = total_price_rounded.replace('.', ',')
+        reembolso = '0' if is_paid else total_price_raw
         
         # Observations: usa custom o genera da SKU
+        # Separatore trattino come app GLS Shopify; aggiunge -x1 finale per contrassegno (COD)
         custom_obs = order_data.get('customObservations', '')
         if custom_obs:
             observaciones = custom_obs
         else:
             items = order_data.get('items', [])
-            observaciones = ', '.join([
-                f"{item['sku']}x{item['quantity']}" 
+            parts = [
+                f"{item['sku']}x{item['quantity']}"
                 for item in items if item.get('sku')
-            ])
+            ]
+            if not is_paid:
+                parts.append('x1')  # contrassegno, come fa l'app GLS Shopify
+            observaciones = '-'.join(parts)
         
         # Estrai albaran dal nome ordine (es: #ES9162 -> 9162)
         order_name = order_data.get('orderName', '')
         albaran = order_name.replace('#ES', '').replace('#', '')
         
+        # Estrai ID numerico Shopify (es: gid://shopify/Order/7294437294421 -> 7294437294421)
+        order_id_raw = str(order_data.get('orderId', ''))
+        numeric_order_id = order_id_raw.split('/')[-1] if '/' in order_id_raw else order_id_raw
+        
         # Dati indirizzo
         shipping = order_data.get('shippingAddress', {})
-        address_line = f"{shipping.get('address1', '')} {shipping.get('address2', '')}".strip()
+        def _clean(val):
+            """Filtra None Python, stringa 'None'/'null'/'undefined' e whitespace."""
+            s = str(val).strip() if val is not None else ''
+            return '' if s.lower() in ('none', 'null', 'undefined', 'n/a') else s
+        address_line = f"{_clean(shipping.get('address1'))} {_clean(shipping.get('address2'))}".strip()
         
         # Data spedizione (oggi in formato DD/MM/YYYY)
         fecha = datetime.now().strftime('%d/%m/%Y')
@@ -104,21 +123,25 @@ def create_gls_shipment(order_data: Dict[str, Any]) -> Dict[str, Any]:
               <Telefono>954981710</Telefono>
             </Remite>
             <Destinatario>
-              <Nombre>{order_data.get('customerName', '')}</Nombre>
+              <Nombre>{_clean(order_data.get('customerName'))}</Nombre>
               <Direccion>{address_line}</Direccion>
-              <Poblacion>{shipping.get('city', '')}</Poblacion>
+              <Poblacion>{_clean(shipping.get('city'))}</Poblacion>
               <Pais>34</Pais>
-              <CP>{shipping.get('zip', '')}</CP>
-              <Telefono>{shipping.get('phone', '')}</Telefono>
-              <Email>{order_data.get('email', '')}</Email>
+              <CP>{_clean(shipping.get('zip'))}</CP>
+              <Telefono>{_clean(shipping.get('phone'))}</Telefono>
+              <Email>{_clean(order_data.get('email'))}</Email>
+              <Observaciones>{observaciones}</Observaciones>
             </Destinatario>
             <Referencias>
               <Referencia tipo="C">{order_name}</Referencia>
+              <Referencia tipo="0">{numeric_order_id}</Referencia>
             </Referencias>
             <Albaran>{albaran}</Albaran>
             <Observaciones>{observaciones}</Observaciones>
-            <Importe>{order_data.get('totalPrice', '0')}</Importe>
-            <Reembolso>{reembolso}</Reembolso>
+            <Importes>
+              <Debidos>0</Debidos>
+              <Reembolso>{reembolso}</Reembolso>
+            </Importes>
             <Retorno>0</Retorno>
           </Envio>
         </Servicios>
@@ -150,36 +173,52 @@ def create_gls_shipment(order_data: Dict[str, Any]) -> Dict[str, Any]:
         
         # Parse XML response
         response_text = response.text
-        print(f"📨 GLS Response: {response_text[:500]}")
+        print(f"📨 GLS Response (full): {response_text}")
         
         try:
             root = ET.fromstring(response_text)
             
-            # Trova elementi nella response (gestisce namespace)
-            # Cerca codbarras (tracking number)
-            codbarras_elem = root.find('.//{http://www.asmred.com/}Envio[@codbarras]')
-            if codbarras_elem is not None:
-                tracking_number = codbarras_elem.get('codbarras')
-            else:
-                # Fallback: cerca in modo case-insensitive
-                codbarras_elem = root.find('.//Envio[@codbarras]')
-                tracking_number = codbarras_elem.get('codbarras') if codbarras_elem is not None else None
+            # Cerca Envio sia con namespace che senza (la risposta SOAP non sempre lo include)
+            envio_elem = (
+                root.find('.//{http://www.asmred.com/}Envio') or
+                root.find('.//Envio')
+            )
             
-            # Verifica errori nella response
-            resultado = root.find('.//{http://www.asmred.com/}Resultado[@return]')
+            # Controlla errori PRIMA di cercare il tracking number
+            resultado = (
+                root.find('.//{http://www.asmred.com/}Resultado') or
+                root.find('.//Resultado')
+            )
             if resultado is not None:
-                return_code = resultado.get('return')
+                return_code = resultado.get('return', '0')
                 if return_code != '0':
+                    if return_code == '-70':
+                        if _retry:
+                            # Secondo errore -70 dopo annullamento → fallback GetExpCli
+                            print(f"⚠️ GLS -70 ancora dopo annullamento, recupero tracking esistente...")
+                            return get_gls_tracking_by_reference(order_name)
+                        # Spedizione già esistente per questa referenza oggi → annulla e ricrea
+                        print(f"⚠️ GLS -70: spedizione già esistente per albaran {albaran}, tentativo annullamento...")
+                        anula_result = anular_gls_shipment(albaran)
+                        if anula_result['success']:
+                            print(f"✅ Annullamento OK, ricreo spedizione...")
+                            return create_gls_shipment(order_data, _retry=True)
+                        else:
+                            print(f"⚠️ Annullamento fallito ({anula_result['error']}), recupero tracking esistente...")
+                            return get_gls_tracking_by_reference(order_name)
                     error_msg = resultado.text or f"GLS error code: {return_code}"
                     return {
                         'success': False,
-                        'error': error_msg
+                        'error': f"GLS errore: {error_msg}"
                     }
+            
+            # Estrai codbarras
+            tracking_number = envio_elem.get('codbarras') if envio_elem is not None else None
             
             if not tracking_number:
                 return {
                     'success': False,
-                    'error': 'GLS non ha restituito tracking number'
+                    'error': f'GLS non ha restituito tracking number. Response: {response_text[:300]}'
                 }
             
             print(f"✅ GLS Tracking Number: {tracking_number}")
@@ -205,6 +244,178 @@ def create_gls_shipment(order_data: Dict[str, Any]) -> Dict[str, Any]:
             'success': False,
             'error': f"Errore GLS: {str(e)}"
         }
+
+
+
+# ============================================================================
+# GLS SERVICE - ANNULLAMENTO SPEDIZIONE (Anula)
+# ============================================================================
+def anular_gls_shipment(albaran: str) -> Dict[str, Any]:
+    """
+    Annulla una spedizione GLS tramite metodo SOAP Anula.
+    Chiamato quando GLS risponde -70, prima di ricreare la spedizione.
+
+    Args:
+        albaran: numero albaran senza prefisso (es: '9267')
+
+    Returns:
+        dict con 'success' o 'error'
+    """
+    try:
+        soap_xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                 xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                 xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <Anula xmlns="http://www.asmred.com/">
+      <docIn>
+        <Servicios uidcliente="{GLS_UID}">
+          <Envio>
+            <Albaran>{albaran}</Albaran>
+          </Envio>
+        </Servicios>
+      </docIn>
+    </Anula>
+  </soap12:Body>
+</soap12:Envelope>"""
+
+        print(f"🗑️ Anula: annullo spedizione albaran '{albaran}'")
+
+        response = requests.post(
+            GLS_SOAP_ENDPOINT,
+            data=soap_xml.encode('utf-8'),
+            headers={
+                'Content-Type': 'text/xml; charset=UTF-8',
+                'SOAPAction': 'http://www.asmred.com/Anula'
+            },
+            timeout=30
+        )
+
+        if not response.ok:
+            return {'success': False, 'error': f"GLS Anula HTTP error: {response.status_code}"}
+
+        response_text = response.text
+        print(f"📨 GLS Anula Response: {response_text}")
+
+        root = ET.fromstring(response_text)
+
+        resultado = (
+            root.find('.//{http://www.asmred.com/}Resultado') or
+            root.find('.//Resultado')
+        )
+
+        if resultado is not None:
+            return_code = resultado.get('return', '0')
+            if return_code == '0':
+                print(f"✅ Spedizione {albaran} annullata con successo")
+                return {'success': True}
+            elif return_code == '-1':
+                # -1 = già cancellata → possiamo procedere a ricrearla
+                print(f"⚠️ Spedizione {albaran} già in stato cancellato (borrado), procedo")
+                return {'success': True}
+            else:
+                error_msg = resultado.text or f"Anula error code: {return_code}"
+                return {'success': False, 'error': f"GLS Anula errore {return_code}: {error_msg}"}
+
+        # Se non c'è <Resultado>, considera successo se la risposta HTTP è OK
+        print(f"✅ Anula completato (no Resultado nel body)")
+        return {'success': True}
+
+    except ET.ParseError as e:
+        return {'success': False, 'error': f"Anula: errore parsing XML: {str(e)}"}
+    except requests.RequestException as e:
+        return {'success': False, 'error': f"Anula: errore HTTP: {str(e)}"}
+    except Exception as e:
+        return {'success': False, 'error': f"Anula: errore generico: {str(e)}"}
+
+
+# ============================================================================
+# GLS SERVICE - RECUPERO TRACKING (GetExpCli)
+# ============================================================================
+GLS_CUSTOMER_ENDPOINT = "https://ws-customer.gls-spain.es/b2b.asmx"
+
+def get_gls_tracking_by_reference(order_name: str) -> Dict[str, Any]:
+    """
+    Recupera il tracking number di una spedizione GLS già esistente tramite GetExpCli.
+    Chiamato quando GLS risponde -70 (ordine già esistente per questa data).
+
+    Args:
+        order_name: referenza cliente usata in GrabaServicios (es: '#ES9267')
+
+    Returns:
+        dict con 'success', 'trackingNumber' o 'error'
+    """
+    try:
+        soap_xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                 xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                 xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
+  <soap12:Body>
+    <GetExpCli xmlns="http://www.asmred.com/">
+      <codigo>{order_name}</codigo>
+      <uid>{GLS_UID}</uid>
+    </GetExpCli>
+  </soap12:Body>
+</soap12:Envelope>"""
+
+        print(f"🔍 GetExpCli: cerco spedizione con referenza '{order_name}'")
+
+        response = requests.post(
+            GLS_CUSTOMER_ENDPOINT,
+            data=soap_xml.encode('utf-8'),
+            headers={
+                'Content-Type': 'text/xml; charset=UTF-8',
+                'SOAPAction': 'http://www.asmred.com/GetExpCli'
+            },
+            timeout=30
+        )
+
+        if not response.ok:
+            return {'success': False, 'error': f"GLS GetExpCli HTTP error: {response.status_code}"}
+
+        response_text = response.text
+        print(f"📨 GLS GetExpCli Response: {response_text}")
+
+        root = ET.fromstring(response_text)
+
+        # Cerca GetExpCliResult → expediciones/exp/expedicion
+        ns = {'asm': 'http://www.asmred.com/'}
+        result_elem = (
+            root.find('.//asm:GetExpCliResult', ns) or
+            root.find('.//GetExpCliResult')
+        )
+
+        if result_elem is None:
+            return {'success': False, 'error': f'GetExpCli: risposta vuota o formato inatteso. Response: {response_text[:400]}'}
+
+        # GetExpCliResult può contenere i figli direttamente (child elements) OPPURE come testo XML
+        exp_elem = result_elem.find('.//{http://www.asmred.com/}exp') or result_elem.find('.//exp')
+        if exp_elem is None and result_elem.text and result_elem.text.strip():
+            # Fallback: testo XML annidato
+            inner_root = ET.fromstring(result_elem.text.strip())
+            exp_elem = inner_root.find('.//{http://www.asmred.com/}exp') or inner_root.find('.//exp')
+
+        if exp_elem is None:
+            return {'success': False, 'error': f'GetExpCli: nessun exp trovato per referenza {order_name}. Response: {response_text[:400]}'}
+
+        expedicion = (
+            exp_elem.findtext('{http://www.asmred.com/}expedicion') or
+            exp_elem.findtext('expedicion')
+        )
+        if not expedicion:
+            return {'success': False, 'error': f'GetExpCli: tag <expedicion> non trovato. exp XML: {ET.tostring(exp_elem, encoding="unicode")[:400]}'}
+
+        # Usa la prima spedizione trovata
+        tracking_number = expedicion.strip()
+        print(f"✅ Tracking recuperato via GetExpCli: {tracking_number}")
+        return {'success': True, 'trackingNumber': tracking_number}
+
+    except ET.ParseError as e:
+        return {'success': False, 'error': f"GetExpCli: errore parsing XML: {str(e)}"}
+    except requests.RequestException as e:
+        return {'success': False, 'error': f"GetExpCli: errore HTTP: {str(e)}"}
+    except Exception as e:
+        return {'success': False, 'error': f"GetExpCli: errore generico: {str(e)}"}
 
 
 # ============================================================================
