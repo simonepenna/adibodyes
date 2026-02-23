@@ -134,7 +134,6 @@ def create_gls_shipment(order_data: Dict[str, Any], _retry: bool = False) -> Dic
             </Destinatario>
             <Referencias>
               <Referencia tipo="C">{order_name}</Referencia>
-              <Referencia tipo="0">{numeric_order_id}</Referencia>
             </Referencias>
             <Albaran>{albaran}</Albaran>
             <Observaciones>{observaciones}</Observaciones>

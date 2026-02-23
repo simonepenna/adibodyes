@@ -170,6 +170,10 @@ def fetch_shopify_orders(days_back=10):
     
     def extract_data(orders):
         for order in orders:
+            # Escludi ordini di test (tag TEST)
+            order_tags = [t.strip().upper() for t in order.get("tags", "").split(",") if t.strip()]
+            if "TEST" in order_tags:
+                continue
             created_at = order.get("created_at")
             for item in order.get("line_items", []):
                 sku = item.get("sku")
@@ -259,6 +263,9 @@ def fetch_backorders():
     sku_backorders = {}
     for edge in all_orders:
         tags = edge["node"].get("tags", [])
+        # Escludi ordini di test (tag TEST)
+        if any(t.strip().upper() == 'TEST' for t in tags):
+            continue
         if any(tag.strip() in TAGS_ORDINI_ARRETRATI for tag in tags):
             for item_edge in edge["node"]["lineItems"]["edges"]:
                 item = item_edge["node"]

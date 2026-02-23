@@ -233,6 +233,19 @@ def calculate_order_stats(orders: list, start_date: str, end_date: str) -> Dict[
     
     for edge in orders:
         order = edge.get('node', {})
+
+        # Escludi ordini cancellati da tutti i conteggi
+        if order.get('cancelledAt'):
+            stats['cancelled_orders'] += 1
+            continue
+
+        # Escludi ordini di test (tag TEST)
+        order_tags = order.get('tags', [])
+        if isinstance(order_tags, str):
+            order_tags = [t.strip() for t in order_tags.split(',')]
+        if any(t.upper() == 'TEST' for t in order_tags):
+            continue
+
         stats['total_orders'] += 1
         
         # Estrai data creazione ordine
@@ -282,10 +295,6 @@ def calculate_order_stats(orders: list, start_date: str, end_date: str) -> Dict[
             stats['payment_status']['unpaid'] += 1
         else:
             stats['payment_status']['partially_paid'] += 1
-        
-        # Cancellazioni
-        if order.get('cancelledAt'):
-            stats['cancelled_orders'] += 1
         
         # Refunds
         refunds = order.get('refunds', [])
