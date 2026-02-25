@@ -176,33 +176,35 @@ export function buildWhatsAppMessage(
   referencia?: string,
   reembolso?: string,
   agenzia?: AgenziaDetails,
+  expedicion?: string,
 ): string {
   const nombre = entrada.nombre.split(' ')[0];
   const ref = referencia ? `\n📦 Pedido: #ES${referencia}` : '';
+  const envio = expedicion ? `\n🚚 Nº envío GLS: ${expedicion}` : '';
 
   switch (entrada.categoria) {
     case 'AUSENTE':
       return (
         `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
-        `Hemos intentado entregarte tu pedido pero no había nadie en casa.${ref}\n\n` +
+        `Hemos intentado entregarte tu pedido pero no había nadie en casa.${ref}${envio}\n\n` +
         `¿Cuándo te va bien que volvamos a intentarlo? 😊`
       );
     case 'RECHAZA':
       return (
         `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
-        `Hemos recibido información de que ha habido un problema con la aceptación de tu pedido.${ref}\n\n` +
+        `Hemos recibido información de que ha habido un problema con la aceptación de tu pedido.${ref}${envio}\n\n` +
         `¿Podemos ayudarte a resolverlo? Estamos aquí para lo que necesites 🙏`
       );
     case 'DEVOLUCION':
       return (
         `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
-        `Nos han indicado que no deseas recibir tu pedido.${ref}\n\n` +
+        `Nos han indicado que no deseas recibir tu pedido.${ref}${envio}\n\n` +
         `Si fue un malentendido o quieres recuperarlo, ¡escríbenos! Buscamos una solución 📦`
       );
     case 'DIRECCION':
       return (
         `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
-        `Nuestro mensajero no ha podido localizar tu dirección para entregarte tu pedido.${ref}\n\n` +
+        `Nuestro mensajero no ha podido localizar tu dirección para entregarte tu pedido.${ref}${envio}\n\n` +
         `¿Puedes confirmarnos la dirección correcta? Así organizamos una nueva entrega 📍`
       );
     case 'PAGO':
@@ -210,13 +212,13 @@ export function buildWhatsAppMessage(
         `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
         `Tu pedido se entrega con pago en efectivo` +
         (reembolso ? ` (importe: ${reembolso})` : '') +
-        `.${ref}\n\n` +
+        `.${ref}${envio}\n\n` +
         `¿Puedes tener el importe exacto preparado para la próxima entrega? 💶`
       );
     case 'RECOGIDA':
       return (
         `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
-        `Tu paquete está pendiente de recoger en la agencia GLS de tu zona.${ref}\n\n` +
+        `Tu paquete está pendiente de recoger en la agencia GLS de tu zona.${ref}${envio}\n\n` +
         (agenzia?.indirizzo_agenzia ? `📍 Dirección: ${agenzia.indirizzo_agenzia}\n` : '') +
         (agenzia?.telefono_agenzia ? `📞 Teléfono: ${agenzia.telefono_agenzia}\n` : '') +
         (agenzia?.orari_agenzia ? `🕐 Horarios: ${agenzia.orari_agenzia}\n` : '') +
@@ -225,13 +227,13 @@ export function buildWhatsAppMessage(
     case 'CONCERTADA':
       return (
         `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
-        `Hemos concertado una nueva entrega para tu pedido.${ref}\n\n` +
+        `Hemos concertado una nueva entrega para tu pedido.${ref}${envio}\n\n` +
         `¡Te esperamos en casa! 🏠 Cualquier cambio, escríbenos.`
       );
     default:
       return (
         `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
-        `Estamos intentando entregarte tu pedido y ha habido un pequeño inconveniente.${ref}\n\n` +
+        `Estamos intentando entregarte tu pedido y ha habido un pequeño inconveniente.${ref}${envio}\n\n` +
         `¿Puedes contactarnos para resolverlo? 😊`
       );
   }

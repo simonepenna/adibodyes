@@ -208,7 +208,7 @@ const GLSAlmacenado = () => {
                     <td className="text-center">
                       {s.phone ? (
                         <a
-                          href={`https://web.whatsapp.com/send?phone=${encodeURIComponent(s.phone.replace(/\D/g, ''))}&text=${encodeURIComponent(buildWhatsAppMessage(s.emailEntry, s.referencia, s.reembolso, s.emailEntry.categoria === 'RECOGIDA' ? { indirizzo_agenzia: s.indirizzo_agenzia, telefono_agenzia: s.telefono_agenzia, orari_agenzia: s.orari_agenzia } : undefined))}`}
+                          href={`https://web.whatsapp.com/send?phone=${encodeURIComponent(s.phone.replace(/\D/g, ''))}&text=${encodeURIComponent(buildWhatsAppMessage(s.emailEntry, s.referencia, s.reembolso, s.emailEntry.categoria === 'RECOGIDA' ? { indirizzo_agenzia: s.indirizzo_agenzia, telefono_agenzia: s.telefono_agenzia, orari_agenzia: s.orari_agenzia } : undefined, s.expedicion))}`}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="btn btn-success btn-sm btn-circle"
