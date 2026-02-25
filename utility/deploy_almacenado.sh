@@ -1,4 +1,5 @@
 #!/bin/bash
+export AWS_PAGER=""
 
 # Configurazione AWS per Almacenado API
 REGION="eu-central-1"

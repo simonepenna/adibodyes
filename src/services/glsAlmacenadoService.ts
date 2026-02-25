@@ -22,16 +22,12 @@ export interface GLSAlmacenadoItem {
   indirizzo_agenzia: string | null;
   telefono_agenzia: string | null;
   orari_agenzia: string | null;
-  already_contacted: string | null; // Data contatto (es. "2026-02-19 14:30") o null
 }
 
 interface GLSAlmacenadoMetadata {
   extraction_date: string;
   period: string;
   total_shipments: number;
-  total_including_contacted: number;
-  already_contacted_skipped: number;
-  show_all: boolean;
   status_filter: string;
 }
 
@@ -41,14 +37,19 @@ export interface GLSAlmacenadoResponse {
 }
 
 const LAMBDA_URL = 'https://i5g7wtxgec.execute-api.eu-central-1.amazonaws.com/prod/almacenado';
-const MARK_CONTACTED_URL = 'https://i5g7wtxgec.execute-api.eu-central-1.amazonaws.com/prod/mark-contacted';
 
-export const fetchGLSAlmacenadoData = async (daysBack: number = 15) => {
+export interface AgenziaDetails {
+  indirizzo_agenzia: string | null;
+  telefono_agenzia: string | null;
+  orari_agenzia: string | null;
+}
+
+export const fetchGLSAlmacenadoData = async (daysBack: number = 14) => {
   try {
     const response = await fetch(LAMBDA_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ days_back: daysBack, show_all: true })
+      body: JSON.stringify({ days_back: daysBack })
     });
     if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
     const data: GLSAlmacenadoResponse = await response.json();
@@ -59,17 +60,179 @@ export const fetchGLSAlmacenadoData = async (daysBack: number = 15) => {
   }
 };
 
-export const markContacted = async (expedicion: string, referencia?: string): Promise<boolean> => {
-  try {
-    const response = await fetch(MARK_CONTACTED_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ expedicion, referencia })
-    });
-    const data = await response.json();
-    return data.success === true;
-  } catch (error) {
-    console.error('Error marking contacted:', error);
-    return false;
-  }
+export const fetchAgenziaDetails = async (expedicion: string): Promise<AgenziaDetails> => {
+  const response = await fetch(LAMBDA_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'get_agenzia', expedicion }),
+  });
+  if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+  return response.json();
 };
+
+// ─── Email parsing ────────────────────────────────────────────────────────────
+
+export type MotivoCategoria =
+  | 'AUSENTE'
+  | 'RECHAZA'
+  | 'DEVOLUCION'
+  | 'DIRECCION'
+  | 'PAGO'
+  | 'RECOGIDA'
+  | 'CONCERTADA'
+  | 'OTRO';
+
+export interface ParsedEmailEntry {
+  expedicion: string;
+  nombre: string;
+  motivoRaw: string;
+  categoria: MotivoCategoria;
+}
+
+export interface CategoriaConfig {
+  label: string;
+  badgeClass: string;
+}
+
+export const CATEGORIA_CONFIG: Record<MotivoCategoria, CategoriaConfig> = {
+  AUSENTE:    { label: 'Ausente',          badgeClass: 'badge-warning' },
+  RECHAZA:    { label: 'Rechaza envío',    badgeClass: 'badge-error' },
+  DEVOLUCION: { label: 'Devolución',       badgeClass: 'badge-error' },
+  DIRECCION:  { label: 'Dirección incorrecta', badgeClass: 'badge-info' },
+  PAGO:       { label: 'Problema pago',    badgeClass: 'badge-warning' },
+  RECOGIDA:   { label: 'Recoger agencia',  badgeClass: 'badge-success' },
+  CONCERTADA: { label: 'Concertada',       badgeClass: 'badge-success' },
+  OTRO:       { label: 'Otro',             badgeClass: 'badge-ghost' },
+};
+
+export function categorizeMotivo(motivo: string): MotivoCategoria {
+  const m = motivo.toLowerCase();
+  if (m.includes('concertad')) return 'CONCERTADA';
+  if (
+    m.includes('rechaz') ||
+    m.includes('no acepta') ||
+    m.includes('indica que no') ||
+    m.includes('no lo quiere')
+  ) return 'RECHAZA';
+  if (m.includes('devolvemos') || m.includes('devuelvan') || m.includes('devoluci')) return 'DEVOLUCION';
+  if (m.includes('direcci') || m.includes('incorrecta') || m.includes('tlf es incorrecto')) return 'DIRECCION';
+  if (m.includes('cambio') || m.includes('tarjeta') || m.includes('solo pagar')) return 'PAGO';
+  if (
+    m.includes('parcell') ||
+    m.includes('parcelshop') ||
+    m.includes('delegaci') ||
+    m.includes('agencia') ||
+    m.includes('recoger')
+  ) return 'RECOGIDA';
+  return 'AUSENTE';
+}
+
+export function parseGLSEmail(text: string): ParsedEmailEntry[] {
+  // Decode quoted-printable encoding (e.g. =E1 → á, =F3 → ó, soft line breaks)
+  const decoded = text
+    .replace(/=\r?\n/g, '')  // soft line breaks
+    .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => {
+      try { return decodeURIComponent('%' + hex); } catch { return ''; }
+    });
+
+  const results: ParsedEmailEntry[] = [];
+  const seen = new Set<string>();
+
+  for (const rawLine of decoded.split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    // Format A: "1253052382- Tatiana Santana:Motivo..." or "1256387608+- Verónica: ..."
+    const matchColon = line.match(/^(\d{9,10})\s*[+\-]*[-]?\s*(.+?)\s*:\s*(.+)$/);
+    if (matchColon) {
+      const expedicion = matchColon[1];
+      const nombre = matchColon[2].trim().replace(/^[-\s]+/, '');
+      const motivo = matchColon[3].trim();
+      if (!seen.has(expedicion) && motivo) {
+        seen.add(expedicion);
+        results.push({ expedicion, nombre, motivoRaw: motivo, categoria: categorizeMotivo(motivo) });
+      }
+      continue;
+    }
+
+    // Format B: "1258444157 Marian Montesinos Garcia, Ausente, llamamos dtt..."
+    const matchComma = line.match(/^(\d{9,10})\s+([^,]+),\s*(.+)$/);
+    if (matchComma) {
+      const expedicion = matchComma[1];
+      const nombre = matchComma[2].trim();
+      const motivo = matchComma[3].trim();
+      if (!seen.has(expedicion) && motivo) {
+        seen.add(expedicion);
+        results.push({ expedicion, nombre, motivoRaw: motivo, categoria: categorizeMotivo(motivo) });
+      }
+    }
+  }
+
+  return results;
+}
+
+export function buildWhatsAppMessage(
+  entrada: ParsedEmailEntry,
+  referencia?: string,
+  reembolso?: string,
+  agenzia?: AgenziaDetails,
+): string {
+  const nombre = entrada.nombre.split(' ')[0];
+  const ref = referencia ? `\n📦 Pedido: #ES${referencia}` : '';
+
+  switch (entrada.categoria) {
+    case 'AUSENTE':
+      return (
+        `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
+        `Hemos intentado entregarte tu pedido pero no había nadie en casa.${ref}\n\n` +
+        `¿Cuándo te va bien que volvamos a intentarlo? 😊`
+      );
+    case 'RECHAZA':
+      return (
+        `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
+        `Hemos recibido información de que ha habido un problema con la aceptación de tu pedido.${ref}\n\n` +
+        `¿Podemos ayudarte a resolverlo? Estamos aquí para lo que necesites 🙏`
+      );
+    case 'DEVOLUCION':
+      return (
+        `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
+        `Nos han indicado que no deseas recibir tu pedido.${ref}\n\n` +
+        `Si fue un malentendido o quieres recuperarlo, ¡escríbenos! Buscamos una solución 📦`
+      );
+    case 'DIRECCION':
+      return (
+        `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
+        `Nuestro mensajero no ha podido localizar tu dirección para entregarte tu pedido.${ref}\n\n` +
+        `¿Puedes confirmarnos la dirección correcta? Así organizamos una nueva entrega 📍`
+      );
+    case 'PAGO':
+      return (
+        `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
+        `Tu pedido se entrega con pago en efectivo` +
+        (reembolso ? ` (importe: ${reembolso})` : '') +
+        `.${ref}\n\n` +
+        `¿Puedes tener el importe exacto preparado para la próxima entrega? 💶`
+      );
+    case 'RECOGIDA':
+      return (
+        `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
+        `Tu paquete está pendiente de recoger en la agencia GLS de tu zona.${ref}\n\n` +
+        (agenzia?.indirizzo_agenzia ? `📍 Dirección: ${agenzia.indirizzo_agenzia}\n` : '') +
+        (agenzia?.telefono_agenzia ? `📞 Teléfono: ${agenzia.telefono_agenzia}\n` : '') +
+        (agenzia?.orari_agenzia ? `🕐 Horarios: ${agenzia.orari_agenzia}\n` : '') +
+        `\nPuedes ir a recogerlo antes de que sea devuelto al remitente 🏃`
+      );
+    case 'CONCERTADA':
+      return (
+        `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
+        `Hemos concertado una nueva entrega para tu pedido.${ref}\n\n` +
+        `¡Te esperamos en casa! 🏠 Cualquier cambio, escríbenos.`
+      );
+    default:
+      return (
+        `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
+        `Estamos intentando entregarte tu pedido y ha habido un pequeño inconveniente.${ref}\n\n` +
+        `¿Puedes contactarnos para resolverlo? 😊`
+      );
+  }
+}

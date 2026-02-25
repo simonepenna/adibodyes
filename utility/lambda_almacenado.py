@@ -1,10 +1,9 @@
 """
-AWS Lambda function per estrarre le spedizioni GLS in stato ALMACENADO
-che non hanno "NO ACEPTA EXPEDICION" nel POD
+AWS Lambda function per estrarre le spedizioni GLS non consegnate (NO ENTREGADO)
+che hanno un Reembolso (contrassegno) diverso da 0
 """
 import requests
 import time
-import boto3
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import re
@@ -28,30 +27,7 @@ logger.setLevel(logging.INFO)
 SHOPIFY_ACCESS_TOKEN = os.environ.get("SHOPIFY_ACCESS_TOKEN")
 SHOPIFY_GRAPHQL_URL = os.environ.get("SHOPIFY_GRAPHQL_URL")
 
-# S3 per tracciare i clienti già contattati
-CONTACTED_S3_BUCKET = os.environ.get("CONTACTED_S3_BUCKET", "adibody-almacenado-state-bucket")
-CONTACTED_S3_KEY = "almacenado/contacted.json"
 
-# Client S3 a livello di modulo (riusato tra invocazioni Lambda - warm start)
-_s3_client = None
-def get_s3_client():
-    global _s3_client
-    if _s3_client is None:
-        _s3_client = boto3.client('s3')
-    return _s3_client
-
-
-def load_contacted_from_s3() -> dict:
-    """Carica da S3 il dizionario {expedicion: data_contatto}. Ritorna {} se non esiste."""
-    try:
-        s3 = get_s3_client()
-        obj = s3.get_object(Bucket=CONTACTED_S3_BUCKET, Key=CONTACTED_S3_KEY)
-        data = json.loads(obj['Body'].read())
-        logger.info(f"📋 Caricati {len(data)} expediciones già contattati da S3")
-        return data
-    except Exception as e:
-        logger.info(f"📋 Nessuno storico contatti trovato su S3 ({e}), parto da zero")
-        return {}
 
 
 class GLSExtranetClient:
@@ -63,8 +39,8 @@ class GLSExtranetClient:
             cookies: Dict con i cookies dalla tua sessione browser (opzionale)
         """
         self.session = requests.Session()
-        # Pool grande per supportare le chiamate parallele (25+ thread simultanei)
-        adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
+        # Pool grande per supportare le chiamate parallele (200 connessioni simultanee)
+        adapter = HTTPAdapter(pool_connections=200, pool_maxsize=200)
         self.session.mount('https://', adapter)
         self.session.mount('http://', adapter)
         self.base_url = "https://extranet.gls-spain.es"
@@ -249,6 +225,7 @@ class GLSExtranetClient:
             'dpto_org': '',
             'cpDst': '',
             'pais_dst': '-987',
+            'noentregadas': 'on',
             'btBuscar.x': '42',
             'btBuscar.y': '3',
         }
@@ -276,6 +253,9 @@ class GLSExtranetClient:
         Estrae le spedizioni dalla tabella nascosta nei commenti HTML
         GLS include una tabella completa con id="gr" dentro i commenti HTML
         che contiene TUTTI i campi incluso cp_dst alla colonna 32
+        
+        Filtra: solo spedizioni con Reembolso (contrassegno) != 0
+        (la ricerca usa già il filtro noentregadas=on sul form GLS)
         
         OTTIMIZZATO: usa regex per estrarre commento + filtra prima di creare dizionari
         
@@ -318,11 +298,11 @@ class GLSExtranetClient:
             logger.warning("⚠️ Colonna 'estado' non trovata")
             return pd.DataFrame()
         
-        # Trova indice colonna 'Pod' per controllare "NO ACEPTA EXPEDICION"
+        # Trova indice colonna 'Reembolso' per filtrare contrassegno != 0
         try:
-            pod_idx = columns.index('Pod')
+            reembolso_idx = columns.index('Reembolso')
         except ValueError:
-            logger.warning("⚠️ Colonna 'Pod' non trovata")
+            logger.warning("⚠️ Colonna 'Reembolso' non trovata")
             return pd.DataFrame()
         
         # Trova indici per tutte le colonne necessarie (micro-ottimizzazione)
@@ -350,15 +330,14 @@ class GLSExtranetClient:
             if len(cells) != len(columns):
                 continue
             
-            # Controlla subito lo stato (colonna estado_idx)
-            estado = cells[estado_idx].get_text(strip=True).upper()
-            if estado != 'ALMACENADO':
-                continue  # Skip se non è ALMACENADO
-            
-            # Controlla POD (colonna pod_idx)
-            pod = cells[pod_idx].get_text(strip=True).upper()
-            if 'NO ACEPTA' in pod:
-                continue  # Skip se contiene "NO ACEPTA" (qualsiasi variante)
+            # Filtra: solo spedizioni con Reembolso (contrassegno) != 0
+            reembolso_raw = cells[reembolso_idx].get_text(strip=True).replace(',', '.').replace('€', '').replace(' ', '')
+            try:
+                reembolso_val = float(reembolso_raw) if reembolso_raw else 0.0
+            except ValueError:
+                reembolso_val = 0.0
+            if reembolso_val == 0.0:
+                continue  # Skip se non è contrassegno
             
             # MICRO-OTTIMIZZAZIONE: Estrai solo le colonne necessarie direttamente
             def get_cell_text(col_name):
@@ -396,7 +375,7 @@ class GLSExtranetClient:
                 'orari_agenzia': None,       # Placeholder - riempito dopo
             })
 
-        logger.info(f"✅ Trovate {len(shipments)} spedizioni ALMACENADO senza 'NO ACEPTA' nel POD")
+        logger.info(f"✅ Trovate {len(shipments)} spedizioni non consegnate con Reembolso != 0")
         return pd.DataFrame(shipments)
 
     def get_phone_from_shopify(self, order_number):
@@ -510,7 +489,7 @@ class GLSExtranetClient:
         """
         try:
             url = f"{self.base_url}/Extranet/MiraEnvios/expedicion.aspx?codplaza_org={codplaza_org}&codexp={codexp}"
-            response = self.session.get(url, verify=False, timeout=15)
+            response = self.session.get(url, verify=False, timeout=6)
 
             if response.status_code != 200:
                 logger.warning(f"⚠️ Extranet agenzia HTTP {response.status_code} per expedicion {codexp}")
@@ -623,24 +602,56 @@ def lambda_handler(event, context):
     Returns:
         dict: Risposta della funzione
     """
-    logger.info("🚀 Avvio estrazione spedizioni GLS in stato ALMACENADO")
+    logger.info("🚀 Avvio estrazione spedizioni GLS non consegnate con Reembolso != 0")
 
     try:
         # === CONFIGURAZIONE ===
         # Parametri da environment variables
         username = os.environ.get("GLS_USERNAME", "586-4073")
         password = os.environ.get("GLS_PASSWORD", "Leneis586?!")
-        
+
         # Parse del body se proviene da API Gateway
         if isinstance(event.get('body'), str):
             body = json.loads(event['body'])
         else:
             body = event
 
-        # Parametro days_back dall'event (default 15 giorni)
-        days_back = int(body.get('days_back', 15))
-        show_all = bool(body.get('show_all', False))  # Se True, restituisce tutti (contattati + non)
-        logger.info(f"📊 Parametri: days_back={days_back}, show_all={show_all}")
+        CORS_HEADERS = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Headers': 'Content-Type',
+            'Access-Control-Allow-Methods': 'GET,POST,OPTIONS'
+        }
+
+        # ============================================================
+        # ACTION: get_agenzia — dettagli singola agenzia on-demand
+        # Body: { "action": "get_agenzia", "expedicion": "586-1234567" }
+        # ============================================================
+        if body.get('action') == 'get_agenzia':
+            expedicion = str(body.get('expedicion', '')).strip()
+            if not expedicion:
+                return {'statusCode': 400, 'headers': CORS_HEADERS,
+                        'body': json.dumps({'error': 'expedicion obbligatorio'})}
+
+            gls_uid = os.environ.get("GLS_UID_CLIENTE", "cbfbcd8f-ef6c-4986-9643-0b964e1efa20")
+            client = GLSExtranetClient()
+            if not client.login(username, password):
+                raise Exception("Login GLS fallito")
+
+            codplaza_org = client.get_codplaza_org_from_soap(expedicion, gls_uid)
+            if not codplaza_org:
+                return {'statusCode': 200, 'headers': CORS_HEADERS,
+                        'body': json.dumps({'indirizzo_agenzia': None, 'telefono_agenzia': None, 'orari_agenzia': None})}
+
+            dettagli = client.get_agenzia_destino_details(codplaza_org, expedicion)
+            return {'statusCode': 200, 'headers': CORS_HEADERS,
+                    'body': json.dumps(dettagli, ensure_ascii=False)}
+
+        # ============================================================
+        # ACTION: default — estrazione lista spedizioni
+        # ============================================================
+        # Parametro days_back dall'event (default 14 giorni = 2 settimane)
+        days_back = int(body.get('days_back', 14))
+        logger.info(f"📊 Parametri: days_back={days_back}")
 
         if not username or not password:
             raise ValueError("GLS_USERNAME e GLS_PASSWORD sono obbligatori nelle environment variables")
@@ -649,19 +660,12 @@ def lambda_handler(event, context):
         today = datetime.now()
         date_from = (today - timedelta(days=days_back)).strftime("%d/%m/%Y")
         date_to = today.strftime("%d/%m/%Y")
-
         logger.info(f"📅 Periodo: {date_from} - {date_to}")
 
-        # 📋 Carica storico contatti da S3 (in parallelo con il login GLS sotto)
-        with ThreadPoolExecutor(max_workers=2) as _ex:
-            _future_contacted = _ex.submit(load_contacted_from_s3)
-
-            # Login con credenziali (eseguito in parallelo con il GET S3)
-            client = GLSExtranetClient()
-            if not client.login(username, password):
-                raise Exception("Login GLS fallito")
-
-        already_contacted = _future_contacted.result()
+        # Login con credenziali
+        client = GLSExtranetClient()
+        if not client.login(username, password):
+            raise Exception("Login GLS fallito")
 
         # Cerca spedizioni
         html = client.search_shipments(date_from, date_to)
@@ -672,7 +676,7 @@ def lambda_handler(event, context):
         logger.info(f"⏱️ Parsing HTML: {time.time() - t_start:.2f}s")
 
         if df.empty:
-            logger.warning("⚠️ Nessuna spedizione in stato ALMACENADO senza 'NO ACEPTA EXPEDICION' trovata")
+            logger.warning("⚠️ Nessuna spedizione non consegnata con Reembolso != 0 trovata")
             return {
                 'statusCode': 200,
                 'headers': {
@@ -681,65 +685,25 @@ def lambda_handler(event, context):
                     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS'
                 },
                 'body': json.dumps({
-                    'message': 'Nessuna spedizione in stato ALMACENADO senza \'NO ACEPTA EXPEDICION\' trovata',
+                    'message': 'Nessuna spedizione non consegnata con contrassegno trovata',
                     'total_shipments': 0,
                     'period': f"{date_from} - {date_to}"
                 })
             }
 
-        # 🔥 OTTIMIZZAZIONE: Batch Shopify + SOAP in parallelo
-        gls_uid = os.environ.get("GLS_UID_CLIENTE", "cbfbcd8f-ef6c-4986-9643-0b964e1efa20")
+        # 🔥 Batch Shopify per telefoni
         order_numbers = df['referencia'].dropna().astype(str).tolist()
-        first_exp = str(df.iloc[0].get('expedicion', '')).strip() if not df.empty else ''
 
         t_start = time.time()
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            future_phones = ex.submit(client.get_phones_from_shopify_batch, order_numbers)
-            future_codplaza = ex.submit(client.get_codplaza_org_from_soap, first_exp, gls_uid) if first_exp else None
-
-        phones_map = future_phones.result()
-        codplaza_org_comune = future_codplaza.result() if future_codplaza else None
+        phones_map = client.get_phones_from_shopify_batch(order_numbers)
         df['phone'] = df['referencia'].map(phones_map)
-        logger.info(f"⏱️ Batch Shopify + SOAP in parallelo: {time.time() - t_start:.2f}s")
-        logger.info(f"🏢 codplaza_org comune: {codplaza_org_comune}")
-
-        # 🏢 Recupero dettagli agenzia in parallelo (tutte le extranet insieme)
-        def fetch_agenzia(idx_expedicion):
-            idx, expedicion = idx_expedicion
-            expedicion = str(expedicion).strip()
-            if not expedicion or not codplaza_org_comune:
-                return idx, {}
-            return idx, client.get_agenzia_destino_details(codplaza_org_comune, expedicion)
-
-        t_start = time.time()
-        expediciones = [(idx, row.get('expedicion', '')) for idx, row in df.iterrows()]
-        with ThreadPoolExecutor(max_workers=min(len(expediciones), 30) or 1) as executor:
-            futures = {executor.submit(fetch_agenzia, item): item for item in expediciones}
-            for future in as_completed(futures):
-                idx, dettagli = future.result()
-                df.loc[idx, ['indirizzo_agenzia', 'telefono_agenzia', 'orari_agenzia']] = [
-                    dettagli.get('indirizzo_agenzia'),
-                    dettagli.get('telefono_agenzia'),
-                    dettagli.get('orari_agenzia'),
-                ]
+        logger.info(f"⏱️ Batch Shopify telefoni: {time.time() - t_start:.2f}s")
 
         logger.info(f"⏱️ Dettagli agenzie extranet parallelo: {time.time() - t_start:.2f}s")
 
         logger.info(f"✅ Trovate {len(df)} spedizioni totali")
 
-        # 📋 Marca le spedizioni già contattate
-        total_before = len(df)
-        df['already_contacted'] = df['expedicion'].astype(str).map(
-            lambda x: already_contacted.get(x, {}).get('data') if isinstance(already_contacted.get(x), dict) else already_contacted.get(x, None)
-        )
-        new_df = df[df['already_contacted'].isna()]
-        skipped = total_before - len(new_df)
-        logger.info(f"📋 Contatti: {total_before} totali → {len(new_df)} da contattare ({skipped} già contattati)")
-
-        # show_all=True → ritorna tutto il df (con campo already_contacted popolato)
-        # show_all=False (default) → ritorna solo quelli non ancora contattati
-        output_df = df if show_all else new_df
-        shipments_list = output_df.to_dict('records')
+        shipments_list = df.to_dict('records')
 
         # 🔥 FIX: Gestisci valori NaN/NaT che non sono validi in JSON
         def clean_for_json(obj):
@@ -763,11 +727,8 @@ def lambda_handler(event, context):
             'metadata': {
                 'extraction_date': datetime.now().isoformat(),
                 'period': f"{date_from} - {date_to}",
-                'total_shipments': len(output_df),
-                'total_including_contacted': total_before,
-                'already_contacted_skipped': skipped,
-                'show_all': show_all,
-                'status_filter': 'ALMACENADO (senza NO ACEPTA nel POD)'
+                'total_shipments': len(df),
+                'status_filter': 'NO ENTREGADO con Reembolso != 0'
             },
             'shipments': shipments_list
         }
@@ -830,10 +791,10 @@ if __name__ == "__main__":
     
     # Simula evento Lambda
     test_event = {
-        'days_back': 15  # Puoi modificare questo valore
+        'days_back': 14  # 2 settimane
     }
     
-    print(f"📅 Test con days_back={test_event['days_back']}")
+    print(f"📅 Test con days_back={test_event['days_back']} (2 settimane)")
     print("=" * 60)
     
     start = time.time()
