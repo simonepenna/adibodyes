@@ -129,14 +129,39 @@ export function categorizeMotivo(motivo: string): MotivoCategoria {
 
 export function parseGLSEmail(text: string): ParsedEmailEntry[] {
   // Decode quoted-printable encoding (e.g. =E1 → á, =F3 → ó, soft line breaks)
-  const decoded = text
+  let decoded = text
     .replace(/=\r?\n/g, '')  // soft line breaks
     .replace(/=([0-9A-Fa-f]{2})/g, (_, hex) => {
       try { return decodeURIComponent('%' + hex); } catch { return ''; }
     });
 
+  // Se è un'email MIME (.eml), estrai solo la sezione text/plain
+  // La sezione text/plain si trova dopo "Content-Type: text/plain..." + riga vuota
+  // e termina al prossimo boundary
+  if (/Content-Type:\s*text\/plain/i.test(decoded)) {
+    const plainMatch = decoded.match(
+      /Content-Type:\s*text\/plain[^\n]*\n(?:[^\n]+\n)*\n([\s\S]+?)(?=\n--|\n------=_NextPart|$)/i
+    );
+    if (plainMatch) decoded = plainMatch[1];
+  }
+
+  // Tronca al tag HTML o a marcatori tipici di firma nel plain text
+  const cutIdx = decoded.search(/<html[\s>]|<http|Este mensaje|This message|Mensaje confidencial|mensaje.*confidencial/i);
+  if (cutIdx !== -1) decoded = decoded.slice(0, cutIdx);
+
   const results: ParsedEmailEntry[] = [];
   const seen = new Set<string>();
+  const isShipmentLine = (l: string) => /^\d{9,10}[\s\-+]/.test(l);
+
+  // Pattern tipici di firme email da ignorare come continuazione
+  const isSignatureLine = (l: string) =>
+    /^(tel[.:éf]|fax|www\.|http|mailto:|c\/\s|calle\s|avda?\.|pol[íi]gono|departamento|administrac)/i.test(l) ||
+    /\d{9}@|@[a-z]+\.[a-z]{2,}/.test(l) ||
+    // Riga con sole parole in TitleCase senza verbi/preposizioni comuni del motivo → nome mittente/azienda
+    (
+      /^[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+){1,5}$/.test(l) &&
+      !/\b(no|en|de|la|el|que|para|por|pero|con|sin|al|una|un|llamamos|ausente|rechaz|acepta|indica|responde|recoger|mando|conciert|concert|pendiente|devol|direcc|tlf)\b/i.test(l)
+    );
 
   for (const rawLine of decoded.split('\n')) {
     const line = rawLine.trim();
@@ -155,8 +180,8 @@ export function parseGLSEmail(text: string): ParsedEmailEntry[] {
       continue;
     }
 
-    // Format B: "1258444157 Marian Montesinos Garcia, Ausente, llamamos dtt..."
-    const matchComma = line.match(/^(\d{9,10})\s+([^,]+),\s*(.+)$/);
+    // Format B: "1258444157 Marian Montesinos Garcia, Ausente..." or "1249452939- Antonia Campos,Pendiente..."
+    const matchComma = line.match(/^(\d{9,10})\s*[-+]*\s+([^,:]+),\s*(.+)$/);
     if (matchComma) {
       const expedicion = matchComma[1];
       const nombre = matchComma[2].trim();
@@ -165,6 +190,15 @@ export function parseGLSEmail(text: string): ParsedEmailEntry[] {
         seen.add(expedicion);
         results.push({ expedicion, nombre, motivoRaw: motivo, categoria: categorizeMotivo(motivo) });
       }
+      continue;
+    }
+
+    // Linea di continuazione: appende al motivoRaw dell'ultimo elemento
+    // Ignora linee che sembrano firma o intestazione
+    if (results.length > 0 && !isShipmentLine(line) && !isSignatureLine(line)) {
+      const last = results[results.length - 1];
+      last.motivoRaw = last.motivoRaw + ' ' + line;
+      last.categoria = categorizeMotivo(last.motivoRaw);
     }
   }
 
@@ -185,31 +219,31 @@ export function buildWhatsAppMessage(
   switch (entrada.categoria) {
     case 'AUSENTE':
       return (
-        `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
+        `¡Hola ${nombre}!\nSomos el equipo de AdiBody\n\n` +
         `Hemos intentado entregarte tu pedido pero no había nadie en casa.${ref}${envio}\n\n` +
         `¿Cuándo te va bien que volvamos a intentarlo? 😊`
       );
     case 'RECHAZA':
       return (
-        `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
+        `¡Hola ${nombre}!\nSomos el equipo de AdiBody\n\n` +
         `Hemos recibido información de que ha habido un problema con la aceptación de tu pedido.${ref}${envio}\n\n` +
         `¿Podemos ayudarte a resolverlo? Estamos aquí para lo que necesites 🙏`
       );
     case 'DEVOLUCION':
       return (
-        `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
+        `¡Hola ${nombre}!\nSomos el equipo de AdiBody\n\n` +
         `Nos han indicado que no deseas recibir tu pedido.${ref}${envio}\n\n` +
         `Si fue un malentendido o quieres recuperarlo, ¡escríbenos! Buscamos una solución 📦`
       );
     case 'DIRECCION':
       return (
-        `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
+        `¡Hola ${nombre}!\nSomos el equipo de AdiBody\n\n` +
         `Nuestro mensajero no ha podido localizar tu dirección para entregarte tu pedido.${ref}${envio}\n\n` +
         `¿Puedes confirmarnos la dirección correcta? Así organizamos una nueva entrega 📍`
       );
     case 'PAGO':
       return (
-        `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
+        `¡Hola ${nombre}!\nSomos el equipo de AdiBody\n\n` +
         `Tu pedido se entrega con pago en efectivo` +
         (reembolso ? ` (importe: ${reembolso})` : '') +
         `.${ref}${envio}\n\n` +
@@ -217,7 +251,7 @@ export function buildWhatsAppMessage(
       );
     case 'RECOGIDA':
       return (
-        `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
+        `¡Hola ${nombre}!\nSomos el equipo de AdiBody\n\n` +
         `Tu paquete está pendiente de recoger en la agencia GLS de tu zona.${ref}${envio}\n\n` +
         (agenzia?.indirizzo_agenzia ? `📍 Dirección: ${agenzia.indirizzo_agenzia}\n` : '') +
         (agenzia?.telefono_agenzia ? `📞 Teléfono: ${agenzia.telefono_agenzia}\n` : '') +
@@ -226,13 +260,13 @@ export function buildWhatsAppMessage(
       );
     case 'CONCERTADA':
       return (
-        `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
+        `¡Hola ${nombre}!\nSomos el equipo de AdiBody\n\n` +
         `Hemos concertado una nueva entrega para tu pedido.${ref}${envio}\n\n` +
         `¡Te esperamos en casa! 🏠 Cualquier cambio, escríbenos.`
       );
     default:
       return (
-        `¡Hola ${nombre}! Somos el equipo de AdiBody 👗\n\n` +
+        `¡Hola ${nombre}!\nSomos el equipo de AdiBody\n\n` +
         `Estamos intentando entregarte tu pedido y ha habido un pequeño inconveniente.${ref}${envio}\n\n` +
         `¿Puedes contactarnos para resolverlo? 😊`
       );
