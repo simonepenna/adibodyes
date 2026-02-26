@@ -36,7 +36,7 @@ const GLSAlmacenado = () => {
     setParseError(null);
     setPageState('loading');
     try {
-      const lambdaData = await fetchGLSAlmacenadoData(21);
+      const lambdaData = await fetchGLSAlmacenadoData(30);
       const lambdaMap = new Map(lambdaData.shipments.map(s => [s.expedicion.replace('586-', ''), s]));
       const enrichedRows: EnrichedShipment[] = [];
       for (const entry of parsed) {
